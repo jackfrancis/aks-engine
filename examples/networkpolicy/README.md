@@ -64,14 +64,15 @@ If you have any customized calico resource manifests, you must also follow the [
 
 ## Cilium
 
-The kubernetes-cilium deployment template enables Cilium networking and policies for the AKS Engine cluster via `"networkPolicy": "cilium"` or `"networkPlugin": "cilium"` being present inside the `kubernetesConfig`.
+The kubernetes-cilium deployment template enables Cilium networking and policies for the AKS Engine cluster via `"networkPolicy": "cilium"` and `"networkPlugin": "cilium"` being present inside the `kubernetesConfig`.
 
 ```json
   "properties": {
     "orchestratorProfile": {
       "orchestratorType": "Kubernetes",
       "kubernetesConfig": {
-        "networkPolicy": "cilium"
+        "networkPolicy": "cilium",
+        "networkPlugin": "cilium"
       }
 ```
 

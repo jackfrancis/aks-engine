@@ -6,6 +6,7 @@
       "orchestratorRelease": "1.12",
       "kubernetesConfig": {
         "networkPolicy": "cilium",
+        "networkPlugin": "cilium",
         "addons": [
           {
             "name": "tiller",
