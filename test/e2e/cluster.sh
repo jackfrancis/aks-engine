@@ -121,10 +121,10 @@ if [ "${SCALE_CLUSTER}" = "true" ]; then
       ${DEV_IMAGE} \
       ./bin/aks-engine scale \
       --subscription-id $SUBSCRIPTION_ID \
-      --deployment-dir _output/$RESOURCE_GROUP \
+      --api-model _output/$RESOURCE_GROUP/apimodel.json \
       --location $REGION \
       --resource-group $RESOURCE_GROUP \
-      --master-FQDN "$RESOURCE_GROUP.$REGION.cloudapp.azure.com" \
+      --apiserver "$RESOURCE_GROUP.$REGION.cloudapp.azure.com" \
       --node-pool $nodepool \
       --new-node-count 1 \
       --auth-method client_secret \
@@ -163,7 +163,7 @@ if [ "${UPGRADE_CLUSTER}" = "true" ]; then
       ${DEV_IMAGE} \
       ./bin/aks-engine upgrade --force \
       --subscription-id $SUBSCRIPTION_ID \
-      --deployment-dir _output/$RESOURCE_GROUP \
+      --api-model _output/$RESOURCE_GROUP/apimodel.json \
       --location $REGION \
       --resource-group $RESOURCE_GROUP \
       --upgrade-version $ver_target \
@@ -204,10 +204,10 @@ if [ "${SCALE_CLUSTER}" = "true" ]; then
     ${DEV_IMAGE} \
     ./bin/aks-engine scale \
     --subscription-id $SUBSCRIPTION_ID \
-    --deployment-dir _output/$RESOURCE_GROUP \
+    --api-model _output/$RESOURCE_GROUP/apimodel.json \
     --location $REGION \
     --resource-group $RESOURCE_GROUP \
-    --master-FQDN "$RESOURCE_GROUP.$REGION.cloudapp.azure.com" \
+    --apiserver "$RESOURCE_GROUP.$REGION.cloudapp.azure.com" \
     --node-pool $nodepool \
     --new-node-count $NODE_COUNT \
     --auth-method client_secret \
