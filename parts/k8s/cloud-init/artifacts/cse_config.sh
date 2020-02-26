@@ -179,6 +179,7 @@ configureK8s() {
     cat << EOF > "${AZURE_JSON_PATH}"
 {
     "cloud":"{{GetTargetEnvironment}}",
+    "foo": "bar",
     "tenantId": "${TENANT_ID}",
     "subscriptionId": "${SUBSCRIPTION_ID}",
     "aadClientId": "${SERVICE_PRINCIPAL_CLIENT_ID}",
