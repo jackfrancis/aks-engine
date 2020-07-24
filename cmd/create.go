@@ -28,22 +28,25 @@ const (
 
 type createCmd struct {
 	authProvider
-	mgmtClusterKubeConfigPath string
-	subscriptionID            string
-	tenantID                  string
-	clientID                  string
-	clientSecret              string
-	azureEnvironment          string
-	clusterName               string
-	vnetName                  string
-	resourceGroup             string
-	location                  string
-	controlPlaneVMType        string
-	nodeVMType                string
-	sshPublicKey              string
-	kubernetesVersion         string
-	controlPlaneNodes         int
-	nodes                     int
+	mgmtClusterKubeConfigPath  string
+	subscriptionID             string
+	tenantID                   string
+	clientID                   string
+	clientSecret               string
+	azureEnvironment           string
+	clusterName                string
+	vnetName                   string
+	resourceGroup              string
+	location                   string
+	controlPlaneVMType         string
+	nodeVMType                 string
+	sshPublicKey               string
+	kubernetesVersion          string
+	controlPlaneNodes          int
+	nodes                      int
+	newClusterKubeConfigPath   string
+	getNewClusterConfigCmdArgs []string
+	isClusterReadyCmdArgs      []string
 }
 
 type clusterCtlConfigMap map[string]string
@@ -102,6 +105,7 @@ func newCreateCmd() *cobra.Command {
 }
 
 func (cc *createCmd) run() error {
+	cc.getNewClusterConfigCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", cc.clusterName), "-o", "jsonpath={.data.value}")
 	azureJSON := AzureJSON{
 		Cloud:                        cc.azureEnvironment,
 		TenantId:                     cc.tenantID,
@@ -152,21 +156,40 @@ func (cc *createCmd) run() error {
 			return errors.Wrap(err, fmt.Sprintf("setting %s env var", k))
 		}
 	}
-	cmd := exec.Command("clusterctl", "init", "--infrastructure", "azure")
-	out, err := cmd.CombinedOutput()
-	if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
-		log.Printf("%\n", string(out))
-		log.Printf("Unable to initialize management cluster for Azure: %s\n", err)
-		return err
+	var needsInit bool
+	for _, namespace := range []string{
+		"capi-system",
+		"capi-webhook-system",
+		"capi-kubeadm-control-plane-system",
+		"capi-kubeadm-bootstrap-system",
+		"capz-system",
+	} {
+		if err := cc.namespaceExistsOnMgmtClusterWithRetry(namespace, 1*time.Second, 5*time.Second); err != nil {
+			needsInit = true
+			break
+		}
 	}
-	cmd = exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", cc.clusterName, "--kubernetes-version", fmt.Sprintf("v%s", cc.kubernetesVersion), "--control-plane-machine-count", strconv.Itoa(cc.controlPlaneNodes), "--worker-machine-count", strconv.Itoa(cc.nodes))
-	out, err = cmd.CombinedOutput()
+	if needsInit {
+		fmt.Printf("\nInitializing cluster-api on the management cluster at %s...\n", cc.mgmtClusterKubeConfigPath)
+		cmd := exec.Command("clusterctl", "init", "--infrastructure", "azure")
+		out, err := cmd.CombinedOutput()
+		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
+			log.Printf("%\n", string(out))
+			log.Printf("Unable to initialize management cluster for Azure: %s\n", err)
+			return err
+		}
+	}
+	fmt.Printf("\nGenerating a new Azure cluster-api config for cluster %s...\n", cc.clusterName)
+	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", cc.clusterName, "--kubernetes-version", fmt.Sprintf("v%s", cc.kubernetesVersion), "--control-plane-machine-count", strconv.Itoa(cc.controlPlaneNodes), "--worker-machine-count", strconv.Itoa(cc.nodes))
+	fmt.Printf("$ %s\n...\n", strings.Join(cmd.Args, " "))
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("%\n", string(out))
 		log.Printf("Unable to generate cluster config: %s\n", err)
 		return err
 	}
 	clusterConfigYaml := fmt.Sprintf("%s.yaml", cc.clusterName)
+	fmt.Printf("\nWriting cluster config to %s...\n", clusterConfigYaml)
 	f, err := os.Create(clusterConfigYaml)
 	if err != nil {
 		log.Printf("Unable to create and open cluster config file for writing: %s\n", err)
@@ -180,13 +203,17 @@ func (cc *createCmd) run() error {
 	if _, err := f.Write(out); err != nil {
 		panic(err)
 	}
-	cmd = exec.Command("kubectl", "apply", "-f", fmt.Sprintf("./%s", clusterConfigYaml))
+	fmt.Printf("\nCreating cluster %s on cluster-api management cluster...\n", cc.clusterName)
+	cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "apply", "-f", fmt.Sprintf("./%s", clusterConfigYaml))
+	fmt.Printf("$ %s\n...\n", strings.Join(cmd.Args, " "))
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("%\n", string(out))
 		log.Printf("Unable to apply cluster config to cluster-api management cluster: %s\n", err)
 		return err
 	}
+	fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster...\n", cc.clusterName)
+	fmt.Printf("$ %s\n...\n", strings.Join(cc.getNewClusterConfigCmdArgs, " "))
 	secret, err := cc.getClusterKubeConfigWithRetry(30*time.Second, 20*time.Minute)
 	if err != nil {
 		log.Printf("Unable to get cluster %s kubeconfig from cluster-api management cluster: %s\n", cc.clusterName, err)
@@ -201,8 +228,9 @@ func (cc *createCmd) run() error {
 		log.Printf("Unable to get home dir: %s\n", err)
 		return err
 	}
-	newClusterKubeConfig := fmt.Sprintf("%s/.kube/%s.kubeconfig", h, cc.clusterName)
-	f2, err := os.Create(newClusterKubeConfig)
+	cc.newClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, cc.clusterName)
+	fmt.Printf("Writing cluster config to %s...\n", cc.newClusterKubeConfigPath)
+	f2, err := os.Create(cc.newClusterKubeConfigPath)
 	if err != nil {
 		log.Printf("Unable to create and open kubeconfig file for writing: %s\n", err)
 		return err
@@ -215,8 +243,17 @@ func (cc *createCmd) run() error {
 	if _, err := f2.Write(decodedBytes); err != nil {
 		panic(err)
 	}
-	// TODO insert appropriate wait conditions before applying CNI spec
-	cmd = exec.Command("kubectl", "apply", "-f", calicoSpec, "--kubeconfig", newClusterKubeConfig)
+	fmt.Printf("\nWaiting for cluster %s to become ready...\n", cc.clusterName)
+	cc.isClusterReadyCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.newClusterKubeConfigPath), "cluster-info")
+	fmt.Printf("$ %s\n...\n", strings.Join(cc.isClusterReadyCmdArgs, " "))
+	err = cc.isClusterReadyWithRetry(30*time.Second, 20*time.Minute)
+	if err != nil {
+		log.Printf("Cluster %s not ready in 20 mins: %s\n", cc.clusterName, err)
+		return err
+	}
+	fmt.Printf("\nApplying calico CNI spec to cluster %s...\n", cc.clusterName)
+	cmd = exec.Command("kubectl", "apply", "-f", calicoSpec, "--kubeconfig", cc.newClusterKubeConfigPath)
+	fmt.Printf("$ %s\n...\n", strings.Join(cmd.Args, " "))
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("%\n", string(out))
@@ -224,6 +261,10 @@ func (cc *createCmd) run() error {
 		return err
 	}
 
+	fmt.Printf("\nYour new cluster %s is ready!\n", cc.clusterName)
+	fmt.Printf("\nE.g.:\n")
+	cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.newClusterKubeConfigPath), "get", "nodes", "-o", "wide")
+	fmt.Printf("$ %s\n\n", strings.Join(cmd.Args, " "))
 	return nil
 }
 
@@ -234,7 +275,7 @@ type getClusterKubeConfigSecretResult struct {
 }
 
 func (cc *createCmd) getClusterKubeConfig() getClusterKubeConfigSecretResult {
-	cmd := exec.Command("kubectl", "get", fmt.Sprintf("secret/%s-kubeconfig", cc.clusterName), "-o", "jsonpath={.data.value}")
+	cmd := exec.Command(cc.getNewClusterConfigCmdArgs[0], cc.getNewClusterConfigCmdArgs[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return getClusterKubeConfigSecretResult{
@@ -276,6 +317,95 @@ func (cc *createCmd) getClusterKubeConfigWithRetry(sleep, timeout time.Duration)
 			}
 		case <-ctx.Done():
 			return secret, errors.Errorf("getClusterKubeConfigWithRetry timed out: %s\n", mostRecentGetClusterKubeConfigWithRetryError)
+		}
+	}
+}
+
+type isExecNonZeroExitResult struct {
+	stdout []byte
+	err    error
+}
+
+func (cc *createCmd) isClusterReady() isExecNonZeroExitResult {
+	cmd := exec.Command(cc.isClusterReadyCmdArgs[0], cc.isClusterReadyCmdArgs[1:]...)
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// isClusterReadyWithRetry will return if the new cluster is ready, retrying up to a timeout
+func (cc *createCmd) isClusterReadyWithRetry(sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentIsClusterReadyWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.isClusterReady()
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentIsClusterReadyWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentIsClusterReadyWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("isClusterReadyWithRetry timed out: %s\n", mostRecentIsClusterReadyWithRetryError)
+		}
+	}
+}
+
+func (cc *createCmd) namespaceExistsOnMgmtCluster(namespace string) isExecNonZeroExitResult {
+	cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "get", "namespace", namespace)
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// namespaceExistsOnMgmtClusterWithRetry will return if the namespace exists on the cluster-api mgmt cluster, retrying up to a timeout
+func (cc *createCmd) namespaceExistsOnMgmtClusterWithRetry(namespace string, sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentNamespaceExistsOnMgmtClusterWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.namespaceExistsOnMgmtCluster(namespace)
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentNamespaceExistsOnMgmtClusterWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentNamespaceExistsOnMgmtClusterWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("namespaceExistsOnMgmtClusterWithRetry timed out: %s\n", mostRecentNamespaceExistsOnMgmtClusterWithRetryError)
 		}
 	}
 }
