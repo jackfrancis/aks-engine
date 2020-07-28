@@ -14,8 +14,10 @@ require (
 	github.com/BurntSushi/toml v0.3.1
 	github.com/Jeffail/gabs v1.1.1
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/briandowns/spinner v1.11.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/dnaeon/go-vcr v1.0.1 // indirect
+	github.com/fatih/color v1.9.0 // indirect
 	github.com/fatih/structs v1.1.0
 	github.com/go-playground/locales v0.12.1 // indirect
 	github.com/go-playground/universal-translator v0.16.0 // indirect
@@ -29,8 +31,7 @@ require (
 	github.com/kr/pretty v0.2.1 // indirect
 	github.com/leodido/go-urn v1.1.0 // indirect
 	github.com/leonelquinteros/gotext v1.4.0
-	github.com/mattn/go-colorable v0.0.9
-	github.com/mattn/go-isatty v0.0.10 // indirect
+	github.com/mattn/go-colorable v0.1.4
 	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b // indirect
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/onsi/ginkgo v1.12.2

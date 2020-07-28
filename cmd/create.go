@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/briandowns/spinner"
+	"github.com/fatih/color"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -105,6 +107,9 @@ func newCreateCmd() *cobra.Command {
 }
 
 func (cc *createCmd) run() error {
+	s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
+	green := color.New(color.FgGreen).SprintFunc()
+	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
 	cc.getNewClusterConfigCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", cc.clusterName), "-o", "jsonpath={.data.value}")
 	azureJSON := AzureJSON{
 		Cloud:                        cc.azureEnvironment,
@@ -179,9 +184,9 @@ func (cc *createCmd) run() error {
 			return err
 		}
 	}
-	fmt.Printf("\nGenerating a new Azure cluster-api config for cluster %s...\n", cc.clusterName)
+	fmt.Printf("\nGenerating a new Azure cluster-api config for cluster %s:\n", cc.clusterName)
 	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", cc.clusterName, "--kubernetes-version", fmt.Sprintf("v%s", cc.kubernetesVersion), "--control-plane-machine-count", strconv.Itoa(cc.controlPlaneNodes), "--worker-machine-count", strconv.Itoa(cc.nodes))
-	fmt.Printf("$ %s\n...\n", strings.Join(cmd.Args, " "))
+	fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("%\n", string(out))
@@ -189,12 +194,18 @@ func (cc *createCmd) run() error {
 		return err
 	}
 	clusterConfigYaml := fmt.Sprintf("%s.yaml", cc.clusterName)
-	fmt.Printf("\nWriting cluster config to %s...\n", clusterConfigYaml)
+	pwd, err := os.Getwd()
+	if err != nil {
+		log.Printf("Unable to get working directory: %s\n", err)
+		return err
+	}
 	f, err := os.Create(clusterConfigYaml)
 	if err != nil {
 		log.Printf("Unable to create and open cluster config file for writing: %s\n", err)
 		return err
 	}
+	fmt.Printf("\nWrote cluster config to %s/%s.\n\n", pwd, clusterConfigYaml)
+	fmt.Printf("%s\n", green("⎈⎈⎈"))
 	defer func() {
 		if err := f.Close(); err != nil {
 			panic(err)
@@ -203,22 +214,29 @@ func (cc *createCmd) run() error {
 	if _, err := f.Write(out); err != nil {
 		panic(err)
 	}
-	fmt.Printf("\nCreating cluster %s on cluster-api management cluster...\n", cc.clusterName)
+	fmt.Printf("\nCreating cluster %s on cluster-api management cluster:\n", cc.clusterName)
 	cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "apply", "-f", fmt.Sprintf("./%s", clusterConfigYaml))
-	fmt.Printf("$ %s\n...\n", strings.Join(cmd.Args, " "))
+	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
+	s.Color("yellow")
+	s.Start()
 	out, err = cmd.CombinedOutput()
+	s.Stop()
 	if err != nil {
 		log.Printf("%\n", string(out))
 		log.Printf("Unable to apply cluster config to cluster-api management cluster: %s\n", err)
 		return err
 	}
-	fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster...\n", cc.clusterName)
-	fmt.Printf("$ %s\n...\n", strings.Join(cc.getNewClusterConfigCmdArgs, " "))
+	fmt.Printf("%s\n", green("⎈⎈⎈"))
+	fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster:\n", cc.clusterName)
+	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cc.getNewClusterConfigCmdArgs, " "))))
+	s.Start()
 	secret, err := cc.getClusterKubeConfigWithRetry(30*time.Second, 20*time.Minute)
+	s.Stop()
 	if err != nil {
 		log.Printf("Unable to get cluster %s kubeconfig from cluster-api management cluster: %s\n", cc.clusterName, err)
 		return err
 	}
+	fmt.Printf("%s\n", green("⎈⎈⎈"))
 	decodedBytes, err := base64.StdEncoding.DecodeString(secret)
 	if err != nil {
 		log.Printf("Unable to decode cluster %s kubeconfig: %s\n", cc.clusterName, err)
@@ -229,7 +247,7 @@ func (cc *createCmd) run() error {
 		return err
 	}
 	cc.newClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, cc.clusterName)
-	fmt.Printf("Writing cluster config to %s...\n", cc.newClusterKubeConfigPath)
+	fmt.Printf("\nWriting cluster config to %s...\n", cc.newClusterKubeConfigPath)
 	f2, err := os.Create(cc.newClusterKubeConfigPath)
 	if err != nil {
 		log.Printf("Unable to create and open kubeconfig file for writing: %s\n", err)
@@ -243,28 +261,34 @@ func (cc *createCmd) run() error {
 	if _, err := f2.Write(decodedBytes); err != nil {
 		panic(err)
 	}
-	fmt.Printf("\nWaiting for cluster %s to become ready...\n", cc.clusterName)
+	fmt.Printf("\nWaiting for cluster %s to become ready:\n", cc.clusterName)
 	cc.isClusterReadyCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.newClusterKubeConfigPath), "cluster-info")
-	fmt.Printf("$ %s\n...\n", strings.Join(cc.isClusterReadyCmdArgs, " "))
+	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cc.isClusterReadyCmdArgs, " "))))
+	s.Start()
 	err = cc.isClusterReadyWithRetry(30*time.Second, 20*time.Minute)
+	s.Stop()
 	if err != nil {
 		log.Printf("Cluster %s not ready in 20 mins: %s\n", cc.clusterName, err)
 		return err
 	}
+	fmt.Printf("%s\n", green("⎈⎈⎈"))
 	fmt.Printf("\nApplying calico CNI spec to cluster %s...\n", cc.clusterName)
 	cmd = exec.Command("kubectl", "apply", "-f", calicoSpec, "--kubeconfig", cc.newClusterKubeConfigPath)
-	fmt.Printf("$ %s\n...\n", strings.Join(cmd.Args, " "))
+	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
+	s.Start()
 	out, err = cmd.CombinedOutput()
+	s.Stop()
 	if err != nil {
 		log.Printf("%\n", string(out))
 		log.Printf("Unable to apply cluster config to cluster-api management cluster: %s\n", err)
 		return err
 	}
+	fmt.Printf("%s\n", green("⎈⎈⎈"))
 
 	fmt.Printf("\nYour new cluster %s is ready!\n", cc.clusterName)
 	fmt.Printf("\nE.g.:\n")
 	cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.newClusterKubeConfigPath), "get", "nodes", "-o", "wide")
-	fmt.Printf("$ %s\n\n", strings.Join(cmd.Args, " "))
+	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 	return nil
 }
 

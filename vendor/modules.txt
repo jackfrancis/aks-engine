@@ -58,6 +58,9 @@ github.com/Jeffail/gabs
 # github.com/blang/semver v3.5.1+incompatible
 ## explicit
 github.com/blang/semver
+# github.com/briandowns/spinner v1.11.1
+## explicit
+github.com/briandowns/spinner
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
@@ -65,6 +68,9 @@ github.com/davecgh/go-spew/spew
 github.com/dimchansky/utfbom
 # github.com/dnaeon/go-vcr v1.0.1
 ## explicit
+# github.com/fatih/color v1.9.0
+## explicit
+github.com/fatih/color
 # github.com/fatih/structs v1.1.0
 ## explicit
 github.com/fatih/structs
@@ -130,7 +136,7 @@ github.com/leodido/go-urn
 ## explicit
 github.com/leonelquinteros/gotext
 github.com/leonelquinteros/gotext/plurals
-# github.com/mattn/go-colorable v0.0.9
+# github.com/mattn/go-colorable v0.1.4
 ## explicit
 github.com/mattn/go-colorable
 # github.com/mattn/go-ieproxy v0.0.0-20190610004146-91bb50d98149
