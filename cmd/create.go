@@ -141,17 +141,18 @@ func (cc *createCmd) run() error {
 		log.Printf("Malformed kubeconfig at %s: %s\n", cc.mgmtClusterKubeConfigPath, err)
 		return err
 	}
-	fmt.Printf("\nChecking if mgmt cluster %s is ready at %s:\n", magentabold(cc.mgmtClusterName), bold(cc.mgmtClusterURL))
+	fmt.Printf("\nChecking if management cluster %s is ready at %s:\n", magentabold(cc.mgmtClusterName), bold(cc.mgmtClusterURL))
 	cc.isMgmtClusterReadyCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "cluster-info")
 	fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cc.isMgmtClusterReadyCmdArgs, " "))))
+	s.Color("yellow")
 	s.Start()
 	err = cc.isClusterReadyWithRetry(cc.isMgmtClusterReadyCmdArgs, 30*time.Second, 20*time.Minute)
 	s.Stop()
 	if err != nil {
-		log.Printf("mgmt cluster %s not ready in 20 mins: %s\n", cc.mgmtClusterName, err)
+		log.Printf("management cluster %s not ready in 20 mins: %s\n", cc.mgmtClusterName, err)
 		return err
 	}
-	fmt.Printf("\nWill use mgmt cluster %s.", magentabold(cc.mgmtClusterName))
+	fmt.Printf("\nWill use management cluster %s.", magentabold(cc.mgmtClusterName))
 	fmt.Printf("\n\n%s\n", green("⎈⎈⎈"))
 	cc.getNewClusterConfigCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", cc.clusterName), "-o", "jsonpath={.data.value}")
 	azureJSON := AzureJSON{
@@ -204,7 +205,7 @@ func (cc *createCmd) run() error {
 			return errors.Wrap(err, fmt.Sprintf("setting %s env var", k))
 		}
 	}
-	fmt.Printf("\nChecking if mgmt cluster %s is cluster-api-ready:\n", yellowbold(cc.mgmtClusterName))
+	fmt.Printf("\nChecking if management cluster %s is cluster-api-ready:\n", yellowbold(cc.mgmtClusterName))
 	var needsInit bool
 	for _, namespace := range []string{
 		"capi-system",
@@ -219,18 +220,20 @@ func (cc *createCmd) run() error {
 		}
 	}
 	if needsInit {
-		fmt.Printf("\nInitializing cluster-api on the management cluster at %s...\n", cc.mgmtClusterKubeConfigPath)
-		cmd := exec.Command("clusterctl", "init", "--infrastructure", "azure")
+		fmt.Printf("\nInstalling cluster-api components on the management cluster %s:\n", magentabold(cc.mgmtClusterName))
+		cmd := exec.Command("clusterctl", "init", "--kubeconfig", cc.mgmtClusterKubeConfigPath, "--infrastructure", "azure")
+		fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
+		s.Start()
 		out, err := cmd.CombinedOutput()
+		s.Stop()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
-			log.Printf("Unable to initialize management cluster for Azure: %s\n", err)
+			log.Printf("Unable to initialize management cluster %s for Azure: %s\n", cc.mgmtClusterName, err)
 			return err
 		}
-	} else {
-		fmt.Printf("\nmgmt cluster %s is cluster-api-ready.\n", magentabold(cc.mgmtClusterName))
-		fmt.Printf("\n%s\n", green("⎈⎈⎈"))
 	}
+	fmt.Printf("\nmanagement cluster %s is cluster-api-ready.\n", magentabold(cc.mgmtClusterName))
+	fmt.Printf("\n%s\n", green("⎈⎈⎈"))
 	fmt.Printf("\nGenerating Azure cluster-api config for new cluster %s:\n", yellowbold(cc.clusterName))
 	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", cc.clusterName, "--kubernetes-version", fmt.Sprintf("v%s", cc.kubernetesVersion), "--control-plane-machine-count", strconv.Itoa(cc.controlPlaneNodes), "--worker-machine-count", strconv.Itoa(cc.nodes))
 	fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
@@ -262,15 +265,11 @@ func (cc *createCmd) run() error {
 		panic(err)
 	}
 	fmt.Printf("\nCreating cluster %s on cluster-api management cluster %s:\n", yellowbold(cc.clusterName), magentabold(cc.mgmtClusterName))
-	cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "apply", "-f", fmt.Sprintf("./%s", clusterConfigYaml))
-	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
-	s.Color("yellow")
 	s.Start()
-	out, err = cmd.CombinedOutput()
+	err = cc.applyKubeSpecWithRetry(cc.mgmtClusterKubeConfigPath, clusterConfigYaml, 3*time.Second, 5*time.Minute)
 	s.Stop()
 	if err != nil {
-		log.Printf("%\n", string(out))
-		log.Printf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", err, cc.mgmtClusterName)
+		log.Printf("Unable to apply cluster config at path %s to cluster-api management cluster %s: %s\n", err, clusterConfigYaml, cc.mgmtClusterName)
 		return err
 	}
 	fmt.Printf("%s\n", green("⎈⎈⎈"))
@@ -450,7 +449,50 @@ func (cc *createCmd) namespaceExistsOnMgmtCluster(namespace string) isExecNonZer
 	}
 }
 
-// namespaceExistsOnMgmtClusterWithRetry will return if the namespace exists on the cluster-api mgmt cluster, retrying up to a timeout
+func (cc *createCmd) applyKubeSpec(kubeconfigPath, yamlSpecPath string) isExecNonZeroExitResult {
+	cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", kubeconfigPath), "apply", "-f", fmt.Sprintf("./%s", yamlSpecPath))
+	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// applyKubeSpecWithRetry will run kubectl apply -f against given kubeconfig, retrying up to a timeout
+func (cc *createCmd) applyKubeSpecWithRetry(kubeconfigPath, yamlSpecPath string, sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentApplyKubeSpecWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.applyKubeSpec(kubeconfigPath, yamlSpecPath)
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentApplyKubeSpecWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentApplyKubeSpecWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("applyKubeSpec timed out: %s\n", mostRecentApplyKubeSpecWithRetryError)
+		}
+	}
+}
+
+// namespaceExistsOnMgmtClusterWithRetry will return if the namespace exists on the cluster-api management cluster, retrying up to a timeout
 func (cc *createCmd) namespaceExistsOnMgmtClusterWithRetry(namespace string, sleep, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
