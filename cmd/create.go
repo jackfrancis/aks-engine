@@ -19,6 +19,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -31,6 +32,8 @@ const (
 type createCmd struct {
 	authProvider
 	mgmtClusterKubeConfigPath  string
+	mgmtClusterName            string
+	mgmtClusterURL             string
 	subscriptionID             string
 	tenantID                   string
 	clientID                   string
@@ -48,6 +51,7 @@ type createCmd struct {
 	nodes                      int
 	newClusterKubeConfigPath   string
 	getNewClusterConfigCmdArgs []string
+	isMgmtClusterReadyCmdArgs  []string
 	isClusterReadyCmdArgs      []string
 }
 
@@ -86,7 +90,7 @@ func newCreateCmd() *cobra.Command {
 	}
 
 	f := createCmd.Flags()
-	f.StringVarP(&cc.mgmtClusterKubeConfigPath, "mgmt-cluster-kubeconfig", "m", "", "path to the kubeconfig of your cluster-api management cluster")
+	f.StringVarP(&cc.mgmtClusterKubeConfigPath, "mgmt-cluster-kubeconfig", "m", "~/.kube/config", "path to the kubeconfig of your cluster-api management cluster")
 	f.StringVarP(&cc.subscriptionID, "subscription-id", "s", "", "Azure Active Directory service principal password")
 	f.StringVarP(&cc.tenantID, "tenant", "", "", "Azure Active Directory tenant, must provide when using service principals")
 	f.StringVarP(&cc.clientID, "client-id", "", "", "Azure Active Directory service principal ID")
@@ -100,8 +104,8 @@ func newCreateCmd() *cobra.Command {
 	f.StringVarP(&cc.nodeVMType, "node-vm-sku", "", "Standard_D2s_v3", "SKU for node VMs, default is Standard_D2s_v3")
 	f.StringVarP(&cc.sshPublicKey, "ssh-public-key", "", "", "SSH public key to install for remote access to VMs")
 	f.StringVarP(&cc.kubernetesVersion, "kubernetes-version", "v", "1.17.8", "Kubernetes version to install, default is 1.17.8")
-	f.IntVarP(&cc.controlPlaneNodes, "control-plane-nodes", "", 3, "number of control plane nodes, default is 3")
-	f.IntVarP(&cc.nodes, "nodes", "", 3, "number of worker nodes, default is 3")
+	f.IntVarP(&cc.controlPlaneNodes, "control-plane-nodes", "", 1, "number of control plane nodes, default is 3")
+	f.IntVarP(&cc.nodes, "nodes", "", 1, "number of worker nodes, default is 3")
 
 	return createCmd
 }
@@ -109,7 +113,46 @@ func newCreateCmd() *cobra.Command {
 func (cc *createCmd) run() error {
 	s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
 	green := color.New(color.FgGreen).SprintFunc()
+	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
+	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
 	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
+	if cc.clusterName == "" {
+		cc.clusterName = fmt.Sprintf("k8s-%s", strconv.Itoa(int(time.Now().Unix())))
+	}
+	if cc.vnetName == "" {
+		cc.vnetName = cc.clusterName
+	}
+	if cc.resourceGroup == "" {
+		cc.resourceGroup = cc.clusterName
+	}
+
+	mgmtClusterKubeConfig, err := clientcmd.LoadFromFile(cc.mgmtClusterKubeConfigPath)
+	if err != nil {
+		log.Printf("Unable to load kubeconfig at %s: %s\n", cc.mgmtClusterKubeConfigPath, err)
+		return err
+	}
+	cc.mgmtClusterName = mgmtClusterKubeConfig.CurrentContext
+	for name, cluster := range mgmtClusterKubeConfig.Clusters {
+		if name == cc.mgmtClusterName {
+			cc.mgmtClusterURL = cluster.Server
+		}
+	}
+	if cc.mgmtClusterURL == "" {
+		log.Printf("Malformed kubeconfig at %s: %s\n", cc.mgmtClusterKubeConfigPath, err)
+		return err
+	}
+	fmt.Printf("\nChecking if mgmt cluster %s is ready at %s:\n", magentabold(cc.mgmtClusterName), bold(cc.mgmtClusterURL))
+	cc.isMgmtClusterReadyCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "cluster-info")
+	fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cc.isMgmtClusterReadyCmdArgs, " "))))
+	s.Start()
+	err = cc.isClusterReadyWithRetry(cc.isMgmtClusterReadyCmdArgs, 30*time.Second, 20*time.Minute)
+	s.Stop()
+	if err != nil {
+		log.Printf("mgmt cluster %s not ready in 20 mins: %s\n", cc.mgmtClusterName, err)
+		return err
+	}
+	fmt.Printf("\nWill use mgmt cluster %s.", magentabold(cc.mgmtClusterName))
+	fmt.Printf("\n\n%s\n", green("⎈⎈⎈"))
 	cc.getNewClusterConfigCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", cc.clusterName), "-o", "jsonpath={.data.value}")
 	azureJSON := AzureJSON{
 		Cloud:                        cc.azureEnvironment,
@@ -161,6 +204,7 @@ func (cc *createCmd) run() error {
 			return errors.Wrap(err, fmt.Sprintf("setting %s env var", k))
 		}
 	}
+	fmt.Printf("\nChecking if mgmt cluster %s is cluster-api-ready:\n", yellowbold(cc.mgmtClusterName))
 	var needsInit bool
 	for _, namespace := range []string{
 		"capi-system",
@@ -183,8 +227,11 @@ func (cc *createCmd) run() error {
 			log.Printf("Unable to initialize management cluster for Azure: %s\n", err)
 			return err
 		}
+	} else {
+		fmt.Printf("\nmgmt cluster %s is cluster-api-ready.\n", magentabold(cc.mgmtClusterName))
+		fmt.Printf("\n%s\n", green("⎈⎈⎈"))
 	}
-	fmt.Printf("\nGenerating a new Azure cluster-api config for cluster %s:\n", cc.clusterName)
+	fmt.Printf("\nGenerating Azure cluster-api config for new cluster %s:\n", yellowbold(cc.clusterName))
 	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", cc.clusterName, "--kubernetes-version", fmt.Sprintf("v%s", cc.kubernetesVersion), "--control-plane-machine-count", strconv.Itoa(cc.controlPlaneNodes), "--worker-machine-count", strconv.Itoa(cc.nodes))
 	fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 	out, err := cmd.CombinedOutput()
@@ -214,7 +261,7 @@ func (cc *createCmd) run() error {
 	if _, err := f.Write(out); err != nil {
 		panic(err)
 	}
-	fmt.Printf("\nCreating cluster %s on cluster-api management cluster:\n", cc.clusterName)
+	fmt.Printf("\nCreating cluster %s on cluster-api management cluster %s:\n", yellowbold(cc.clusterName), magentabold(cc.mgmtClusterName))
 	cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "apply", "-f", fmt.Sprintf("./%s", clusterConfigYaml))
 	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 	s.Color("yellow")
@@ -223,17 +270,17 @@ func (cc *createCmd) run() error {
 	s.Stop()
 	if err != nil {
 		log.Printf("%\n", string(out))
-		log.Printf("Unable to apply cluster config to cluster-api management cluster: %s\n", err)
+		log.Printf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", err, cc.mgmtClusterName)
 		return err
 	}
 	fmt.Printf("%s\n", green("⎈⎈⎈"))
-	fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster:\n", cc.clusterName)
+	fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster %s:\n", yellowbold(cc.clusterName), magentabold(cc.mgmtClusterName))
 	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cc.getNewClusterConfigCmdArgs, " "))))
 	s.Start()
 	secret, err := cc.getClusterKubeConfigWithRetry(30*time.Second, 20*time.Minute)
 	s.Stop()
 	if err != nil {
-		log.Printf("Unable to get cluster %s kubeconfig from cluster-api management cluster: %s\n", cc.clusterName, err)
+		log.Printf("Unable to get cluster %s kubeconfig from cluster-api management cluster %s: %s\n", yellowbold(cc.clusterName), yellowbold(cc.mgmtClusterName), err)
 		return err
 	}
 	fmt.Printf("%s\n", green("⎈⎈⎈"))
@@ -261,18 +308,19 @@ func (cc *createCmd) run() error {
 	if _, err := f2.Write(decodedBytes); err != nil {
 		panic(err)
 	}
-	fmt.Printf("\nWaiting for cluster %s to become ready:\n", cc.clusterName)
+	fmt.Printf("\nWaiting for cluster %s to become ready:\n", yellowbold(cc.clusterName))
 	cc.isClusterReadyCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.newClusterKubeConfigPath), "cluster-info")
+	cc.isMgmtClusterReadyCmdArgs = append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "cluster-info")
 	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cc.isClusterReadyCmdArgs, " "))))
 	s.Start()
-	err = cc.isClusterReadyWithRetry(30*time.Second, 20*time.Minute)
+	err = cc.isClusterReadyWithRetry(cc.isClusterReadyCmdArgs, 30*time.Second, 20*time.Minute)
 	s.Stop()
 	if err != nil {
 		log.Printf("Cluster %s not ready in 20 mins: %s\n", cc.clusterName, err)
 		return err
 	}
 	fmt.Printf("%s\n", green("⎈⎈⎈"))
-	fmt.Printf("\nApplying calico CNI spec to cluster %s...\n", cc.clusterName)
+	fmt.Printf("\nApplying calico CNI spec to cluster %s...\n", yellowbold(cc.clusterName))
 	cmd = exec.Command("kubectl", "apply", "-f", calicoSpec, "--kubeconfig", cc.newClusterKubeConfigPath)
 	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 	s.Start()
@@ -285,7 +333,7 @@ func (cc *createCmd) run() error {
 	}
 	fmt.Printf("%s\n", green("⎈⎈⎈"))
 
-	fmt.Printf("\nYour new cluster %s is ready!\n", cc.clusterName)
+	fmt.Printf("\nYour new cluster %s is ready!\n", yellowbold(cc.clusterName))
 	fmt.Printf("\nE.g.:\n")
 	cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.newClusterKubeConfigPath), "get", "nodes", "-o", "wide")
 	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
@@ -350,8 +398,8 @@ type isExecNonZeroExitResult struct {
 	err    error
 }
 
-func (cc *createCmd) isClusterReady() isExecNonZeroExitResult {
-	cmd := exec.Command(cc.isClusterReadyCmdArgs[0], cc.isClusterReadyCmdArgs[1:]...)
+func (cc *createCmd) isClusterReady(cmdArgs []string) isExecNonZeroExitResult {
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	out, err := cmd.CombinedOutput()
 	return isExecNonZeroExitResult{
 		stdout: out,
@@ -360,7 +408,7 @@ func (cc *createCmd) isClusterReady() isExecNonZeroExitResult {
 }
 
 // isClusterReadyWithRetry will return if the new cluster is ready, retrying up to a timeout
-func (cc *createCmd) isClusterReadyWithRetry(sleep, timeout time.Duration) error {
+func (cc *createCmd) isClusterReadyWithRetry(cmdArgs []string, sleep, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	ch := make(chan isExecNonZeroExitResult)
@@ -372,7 +420,7 @@ func (cc *createCmd) isClusterReadyWithRetry(sleep, timeout time.Duration) error
 			case <-ctx.Done():
 				return
 			default:
-				ch <- cc.isClusterReady()
+				ch <- cc.isClusterReady(cmdArgs)
 				time.Sleep(sleep)
 			}
 		}
@@ -394,6 +442,7 @@ func (cc *createCmd) isClusterReadyWithRetry(sleep, timeout time.Duration) error
 
 func (cc *createCmd) namespaceExistsOnMgmtCluster(namespace string) isExecNonZeroExitResult {
 	cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", cc.mgmtClusterKubeConfigPath), "get", "namespace", namespace)
+	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 	out, err := cmd.CombinedOutput()
 	return isExecNonZeroExitResult{
 		stdout: out,
