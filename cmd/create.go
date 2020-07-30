@@ -53,6 +53,8 @@ type createCmd struct {
 	getNewClusterConfigCmdArgs []string
 	isMgmtClusterReadyCmdArgs  []string
 	isClusterReadyCmdArgs      []string
+	needsClusterAPIInit        bool
+	needsPivot                 bool
 }
 
 type clusterCtlConfigMap map[string]string
@@ -90,7 +92,7 @@ func newCreateCmd() *cobra.Command {
 	}
 
 	f := createCmd.Flags()
-	f.StringVarP(&cc.mgmtClusterKubeConfigPath, "mgmt-cluster-kubeconfig", "m", "~/.kube/config", "path to the kubeconfig of your cluster-api management cluster")
+	f.StringVarP(&cc.mgmtClusterKubeConfigPath, "mgmt-cluster-kubeconfig", "m", "", "path to the kubeconfig of your cluster-api management cluster")
 	f.StringVarP(&cc.subscriptionID, "subscription-id", "s", "", "Azure Active Directory service principal password")
 	f.StringVarP(&cc.tenantID, "tenant", "", "", "Azure Active Directory tenant, must provide when using service principals")
 	f.StringVarP(&cc.clientID, "client-id", "", "", "Azure Active Directory service principal ID")
@@ -99,7 +101,7 @@ func newCreateCmd() *cobra.Command {
 	f.StringVarP(&cc.clusterName, "cluster-name", "n", "", "name of cluster")
 	f.StringVarP(&cc.vnetName, "vnet-name", "", "", "name of vnet the cluster will reside in")
 	f.StringVarP(&cc.resourceGroup, "resource-group", "g", "", "name of resource group the cluster IaaS will reside in")
-	f.StringVarP(&cc.location, "location", "l", "", "Azure region cluster IaaS will reside in")
+	f.StringVarP(&cc.location, "location", "l", "westus2", "Azure region cluster IaaS will reside in")
 	f.StringVarP(&cc.controlPlaneVMType, "control-plan-vm-sku", "", "Standard_D2s_v3", "SKU for control plane VMs, default is Standard_D2s_v3")
 	f.StringVarP(&cc.nodeVMType, "node-vm-sku", "", "Standard_D2s_v3", "SKU for node VMs, default is Standard_D2s_v3")
 	f.StringVarP(&cc.sshPublicKey, "ssh-public-key", "", "", "SSH public key to install for remote access to VMs")
@@ -126,9 +128,48 @@ func (cc *createCmd) run() error {
 		cc.resourceGroup = cc.clusterName
 	}
 
+	h, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("Unable to get home dir: %s\n", err)
+		return err
+	}
+	if cc.mgmtClusterKubeConfigPath == "" {
+		cc.needsClusterAPIInit = true
+		cc.mgmtClusterName = fmt.Sprintf("capi-mgmt-%s", strconv.Itoa(int(time.Now().Unix())))
+		cc.needsPivot = true
+		fmt.Printf("\nCreating an AKS management cluster %s for cluster-api management components:\n", magentabold(cc.mgmtClusterName))
+		s.Color("yellow")
+		s.Start()
+		err = cc.createAKSMgmtClusterResourceGroupWithRetry(cc.mgmtClusterName, 30*time.Second, 3*time.Minute)
+		if err != nil {
+			log.Printf("Unable to create AKS management cluster resource group: %s\n", err)
+			return err
+		}
+		err = cc.createAKSMgmtClusterWithRetry(cc.mgmtClusterName, 30*time.Second, 10*time.Minute)
+		s.Stop()
+		if err != nil {
+			log.Printf("Unable to create AKS management cluster: %s\n", err)
+			return err
+		}
+		fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+		cc.mgmtClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, cc.mgmtClusterName)
+		fmt.Printf("\nGetting kubeconfig for AKS cluster-api management cluster %s:\n", magentabold(cc.mgmtClusterName))
+		s.Start()
+		err = cc.getAKSMgmtClusterCredsWithRetry(5*time.Second, 10*time.Minute)
+		s.Stop()
+		if err != nil {
+			log.Printf("Unable to get AKS management cluster kubeconfig: %s\n", err)
+			return err
+		}
+		fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+	}
 	mgmtClusterKubeConfig, err := clientcmd.LoadFromFile(cc.mgmtClusterKubeConfigPath)
 	if err != nil {
 		log.Printf("Unable to load kubeconfig at %s: %s\n", cc.mgmtClusterKubeConfigPath, err)
+		return err
+	}
+	if cc.mgmtClusterName != "" && cc.mgmtClusterName != mgmtClusterKubeConfig.CurrentContext {
+		log.Printf("Got unexpected AKS management cluster kubeconfig")
 		return err
 	}
 	cc.mgmtClusterName = mgmtClusterKubeConfig.CurrentContext
@@ -205,21 +246,23 @@ func (cc *createCmd) run() error {
 			return errors.Wrap(err, fmt.Sprintf("setting %s env var", k))
 		}
 	}
-	fmt.Printf("\nChecking if management cluster %s is cluster-api-ready:\n", yellowbold(cc.mgmtClusterName))
-	var needsInit bool
-	for _, namespace := range []string{
-		"capi-system",
-		"capi-webhook-system",
-		"capi-kubeadm-control-plane-system",
-		"capi-kubeadm-bootstrap-system",
-		"capz-system",
-	} {
-		if err := cc.namespaceExistsOnMgmtClusterWithRetry(namespace, 1*time.Second, 5*time.Second); err != nil {
-			needsInit = true
-			break
+
+	if !cc.needsClusterAPIInit {
+		fmt.Printf("\nChecking if management cluster %s is cluster-api-ready:\n", magentabold(cc.mgmtClusterName))
+		for _, namespace := range []string{
+			"capi-system",
+			"capi-webhook-system",
+			"capi-kubeadm-control-plane-system",
+			"capi-kubeadm-bootstrap-system",
+			"capz-system",
+		} {
+			if err := cc.namespaceExistsOnMgmtClusterWithRetry(namespace, 1*time.Second, 5*time.Second); err != nil {
+				cc.needsClusterAPIInit = true
+				break
+			}
 		}
 	}
-	if needsInit {
+	if cc.needsClusterAPIInit {
 		fmt.Printf("\nInstalling cluster-api components on the management cluster %s:\n", magentabold(cc.mgmtClusterName))
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", cc.mgmtClusterKubeConfigPath, "--infrastructure", "azure")
 		fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
@@ -272,7 +315,7 @@ func (cc *createCmd) run() error {
 		log.Printf("Unable to apply cluster config at path %s to cluster-api management cluster %s: %s\n", err, clusterConfigYaml, cc.mgmtClusterName)
 		return err
 	}
-	fmt.Printf("%s\n", green("⎈⎈⎈"))
+	fmt.Printf("\n%s\n", green("⎈⎈⎈"))
 	fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster %s:\n", yellowbold(cc.clusterName), magentabold(cc.mgmtClusterName))
 	fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cc.getNewClusterConfigCmdArgs, " "))))
 	s.Start()
@@ -286,11 +329,6 @@ func (cc *createCmd) run() error {
 	decodedBytes, err := base64.StdEncoding.DecodeString(secret)
 	if err != nil {
 		log.Printf("Unable to decode cluster %s kubeconfig: %s\n", cc.clusterName, err)
-	}
-	h, err := os.UserHomeDir()
-	if err != nil {
-		log.Printf("Unable to get home dir: %s\n", err)
-		return err
 	}
 	cc.newClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, cc.clusterName)
 	fmt.Printf("\nWriting cluster config to %s...\n", cc.newClusterKubeConfigPath)
@@ -331,6 +369,45 @@ func (cc *createCmd) run() error {
 		return err
 	}
 	fmt.Printf("%s\n", green("⎈⎈⎈"))
+
+	if cc.needsPivot {
+		fmt.Printf("\nInstalling cluster-api components on cluster %s:\n", yellowbold(cc.clusterName))
+		cmd := exec.Command("clusterctl", "init", "--kubeconfig", cc.newClusterKubeConfigPath, "--infrastructure", "azure")
+		fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
+		s.Start()
+		out, err := cmd.CombinedOutput()
+		s.Stop()
+		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
+			log.Printf("%\n", string(out))
+			log.Printf("Unable to install cluster-api components on cluster %s: %s\n", cc.clusterName, err)
+			return err
+		}
+		fmt.Printf("\nEnabling management of cluster %s via local cluster-api interfaces:\n", yellowbold(cc.clusterName))
+		cmd = exec.Command("clusterctl", "move", "--kubeconfig", cc.mgmtClusterKubeConfigPath, "--to-kubeconfig", cc.newClusterKubeConfigPath)
+		fmt.Printf("%s\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
+		s.Start()
+		out, err = cmd.CombinedOutput()
+		s.Stop()
+		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
+			log.Printf("%\n", string(out))
+			log.Printf("Unable to move cluster-api objects from cluster %s to cluster %s: %s\n", cc.mgmtClusterName, cc.clusterName, err)
+			return err
+		}
+		fmt.Printf("\nCleaning up temporary AKS management cluster %s:\n", yellowbold(cc.mgmtClusterName))
+		s.Start()
+		err = cc.deleteAKSMgmtClusterWithRetry(cc.mgmtClusterName, 30*time.Second, 10*time.Minute)
+		if err != nil {
+			log.Printf("Unable to delete AKS management cluster: %s\n", err)
+			return err
+		}
+		err = cc.deleteAKSMgmtClusterResourceGroupWithRetry(cc.mgmtClusterName, 30*time.Second, 3*time.Minute)
+		s.Stop()
+		if err != nil {
+			log.Printf("Unable to delete AKS management cluster resource group: %s\n", err)
+			return err
+		}
+		fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+	}
 
 	fmt.Printf("\nYour new cluster %s is ready!\n", yellowbold(cc.clusterName))
 	fmt.Printf("\nE.g.:\n")
@@ -521,6 +598,221 @@ func (cc *createCmd) namespaceExistsOnMgmtClusterWithRetry(namespace string, sle
 		case <-ctx.Done():
 			fmt.Printf("%s\n", string(stdout))
 			return errors.Errorf("namespaceExistsOnMgmtClusterWithRetry timed out: %s\n", mostRecentNamespaceExistsOnMgmtClusterWithRetryError)
+		}
+	}
+}
+
+func (cc *createCmd) getAKSMgmtClusterCreds() isExecNonZeroExitResult {
+	cmd := exec.Command("az", "aks", "get-credentials", "-g", cc.mgmtClusterName, "-n", cc.mgmtClusterName, "-f", cc.mgmtClusterKubeConfigPath)
+	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// getAKSMgmtClusterCredsWithRetry gets AKS cluster kubeconfig, retrying up to a timeout
+func (cc *createCmd) getAKSMgmtClusterCredsWithRetry(sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentGetAKSMgmtClusterCredsWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.getAKSMgmtClusterCreds()
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentGetAKSMgmtClusterCredsWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentGetAKSMgmtClusterCredsWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("getAKSMgmtClusterCredsWithRetry timed out: %s\n", mostRecentGetAKSMgmtClusterCredsWithRetryError)
+		}
+	}
+}
+
+func (cc *createCmd) createAKSMgmtClusterResourceGroup(name string) isExecNonZeroExitResult {
+	cmd := exec.Command("az", "group", "create", "-g", name, "-l", cc.location)
+	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+func (cc *createCmd) deleteAKSMgmtClusterResourceGroup(name string) isExecNonZeroExitResult {
+	cmd := exec.Command("az", "group", "delete", "-g", name, "--no-wait", "-y")
+	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// createAKSMgmtClusterResourceGroupWithRetry will create the resource group for an AKS cluster, retrying up to a timeout
+func (cc *createCmd) createAKSMgmtClusterResourceGroupWithRetry(name string, sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentCreateAKSMgmtClusterResourceGroupWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.createAKSMgmtClusterResourceGroup(name)
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentCreateAKSMgmtClusterResourceGroupWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentCreateAKSMgmtClusterResourceGroupWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("createAKSMgmtClusterResourceGroupWithRetry timed out: %s\n", mostRecentCreateAKSMgmtClusterResourceGroupWithRetryError)
+		}
+	}
+}
+
+// deleteAKSMgmtClusterResourceGroupWithRetry will create the resource group for an AKS cluster, retrying up to a timeout
+func (cc *createCmd) deleteAKSMgmtClusterResourceGroupWithRetry(name string, sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentDeleteAKSMgmtClusterResourceGroupWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.deleteAKSMgmtClusterResourceGroup(name)
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentDeleteAKSMgmtClusterResourceGroupWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentDeleteAKSMgmtClusterResourceGroupWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("deleteAKSMgmtClusterResourceGroupWithRetry timed out: %s\n", mostRecentDeleteAKSMgmtClusterResourceGroupWithRetryError)
+		}
+	}
+}
+
+func (cc *createCmd) createAKSMgmtCluster(name string) isExecNonZeroExitResult {
+	cmd := exec.Command("az", "aks", "create", "-g", name, "-n", name, "--kubernetes-version", "1.17.7", "-c", "1", "-s", "Standard_B2s")
+	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+func (cc *createCmd) deleteAKSMgmtCluster(name string) isExecNonZeroExitResult {
+	cmd := exec.Command("az", "aks", "delete", "-g", name, "-n", name, "--no-wait", "-y")
+	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// createAKSMgmtClusterWithRetry will create an AKS cluster, retrying up to a timeout
+func (cc *createCmd) createAKSMgmtClusterWithRetry(name string, sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentCreateAKSMgmtClusterWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.createAKSMgmtCluster(name)
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentCreateAKSMgmtClusterWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentCreateAKSMgmtClusterWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("createAKSMgmtClusterWithRetry timed out: %s\n", mostRecentCreateAKSMgmtClusterWithRetryError)
+		}
+	}
+}
+
+// deleteAKSMgmtClusterWithRetry will create an AKS cluster, retrying up to a timeout
+func (cc *createCmd) deleteAKSMgmtClusterWithRetry(name string, sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentDeleteAKSMgmtClusterWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- cc.deleteAKSMgmtCluster(name)
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentDeleteAKSMgmtClusterWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentDeleteAKSMgmtClusterWithRetryError == nil {
+				return nil
+			}
+		case <-ctx.Done():
+			fmt.Printf("%s\n", string(stdout))
+			return errors.Errorf("deleteAKSMgmtClusterWithRetry timed out: %s\n", mostRecentDeleteAKSMgmtClusterWithRetryError)
 		}
 	}
 }
