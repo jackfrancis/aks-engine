@@ -55,6 +55,12 @@ github.com/BurntSushi/toml
 # github.com/Jeffail/gabs v1.1.1
 ## explicit
 github.com/Jeffail/gabs
+# github.com/PuerkitoBio/purell v1.1.1
+github.com/PuerkitoBio/purell
+# github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578
+github.com/PuerkitoBio/urlesc
+# github.com/asaskevich/govalidator v0.0.0-20190424111038-f61b66f89f4a
+github.com/asaskevich/govalidator
 # github.com/blang/semver v3.5.1+incompatible
 ## explicit
 github.com/blang/semver
@@ -68,6 +74,8 @@ github.com/davecgh/go-spew/spew
 github.com/dimchansky/utfbom
 # github.com/dnaeon/go-vcr v1.0.1
 ## explicit
+# github.com/docker/go-units v0.4.0
+github.com/docker/go-units
 # github.com/fatih/color v1.9.0
 ## explicit
 github.com/fatih/color
@@ -123,6 +131,9 @@ github.com/inconshreveable/mousetrap
 # github.com/jarcoal/httpmock v1.0.1
 ## explicit
 github.com/jarcoal/httpmock
+# github.com/jessevdk/go-flags v1.4.0
+## explicit
+github.com/jessevdk/go-flags
 # github.com/json-iterator/go v1.1.7
 github.com/json-iterator/go
 # github.com/konsorten/go-windows-terminal-sequences v1.0.1
@@ -136,6 +147,10 @@ github.com/leodido/go-urn
 ## explicit
 github.com/leonelquinteros/gotext
 github.com/leonelquinteros/gotext/plurals
+# github.com/mailru/easyjson v0.0.0-20190626092158-b2ccc519800e
+github.com/mailru/easyjson/buffer
+github.com/mailru/easyjson/jlexer
+github.com/mailru/easyjson/jwriter
 # github.com/mattn/go-colorable v0.1.4
 ## explicit
 github.com/mattn/go-colorable
@@ -230,6 +245,7 @@ golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
 golang.org/x/crypto/ssh/terminal
 # golang.org/x/net v0.0.0-20200520004742-59133d7f0dd7
+## explicit
 golang.org/x/net/context
 golang.org/x/net/context/ctxhttp
 golang.org/x/net/html
@@ -240,6 +256,7 @@ golang.org/x/net/http/httpproxy
 golang.org/x/net/http2
 golang.org/x/net/http2/hpack
 golang.org/x/net/idna
+golang.org/x/net/netutil
 # golang.org/x/oauth2 v0.0.0-20190604053449-0f29369cfe45
 golang.org/x/oauth2
 golang.org/x/oauth2/internal
@@ -273,6 +290,7 @@ golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
+golang.org/x/text/width
 # golang.org/x/time v0.0.0-20190921001708-c4c64cad1fd0
 ## explicit
 golang.org/x/time/rate
