@@ -83,6 +83,9 @@ definitions:
       sshPublicKey:
         type: string
         minLength: 0
+      kubernetesVersion:
+        type: string
+        minLength: 0
       controlPlaneNodes:
         type: integer
         minLength: 0

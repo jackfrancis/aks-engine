@@ -41,6 +41,10 @@ type CreateData struct {
 	// Min Length: 0
 	ControlPlaneVMType *string `json:"controlPlaneVMType,omitempty"`
 
+	// kubernetes version
+	// Min Length: 0
+	KubernetesVersion *string `json:"kubernetesVersion,omitempty"`
+
 	// location
 	// Min Length: 0
 	Location *string `json:"location,omitempty"`
@@ -103,6 +107,10 @@ func (m *CreateData) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validateControlPlaneVMType(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateKubernetesVersion(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -220,6 +228,19 @@ func (m *CreateData) validateControlPlaneVMType(formats strfmt.Registry) error {
 	}
 
 	if err := validate.MinLength("controlPlaneVMType", "body", string(*m.ControlPlaneVMType), 0); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *CreateData) validateKubernetesVersion(formats strfmt.Registry) error {
+
+	if swag.IsZero(m.KubernetesVersion) { // not required
+		return nil
+	}
+
+	if err := validate.MinLength("kubernetesVersion", "body", string(*m.KubernetesVersion), 0); err != nil {
 		return err
 	}
 

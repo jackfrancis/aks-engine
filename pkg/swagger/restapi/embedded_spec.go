@@ -100,6 +100,9 @@ func init() {
         "controlPlaneVMType": {
           "type": "string"
         },
+        "kubernetesVersion": {
+          "type": "string"
+        },
         "location": {
           "type": "string"
         },
@@ -238,6 +241,10 @@ func init() {
           "minLength": 0
         },
         "controlPlaneVMType": {
+          "type": "string",
+          "minLength": 0
+        },
+        "kubernetesVersion": {
           "type": "string",
           "minLength": 0
         },
