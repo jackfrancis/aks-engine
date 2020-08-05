@@ -49,9 +49,9 @@ type CreateData struct {
 	// Min Length: 0
 	Location *string `json:"location,omitempty"`
 
-	// mgmt cluster kube config path
+	// mgmt cluster kube config
 	// Min Length: 0
-	MgmtClusterKubeConfigPath *string `json:"mgmtClusterKubeConfigPath,omitempty"`
+	MgmtClusterKubeConfig *string `json:"mgmtClusterKubeConfig,omitempty"`
 
 	// node VM type
 	// Min Length: 0
@@ -118,7 +118,7 @@ func (m *CreateData) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
-	if err := m.validateMgmtClusterKubeConfigPath(formats); err != nil {
+	if err := m.validateMgmtClusterKubeConfig(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -260,13 +260,13 @@ func (m *CreateData) validateLocation(formats strfmt.Registry) error {
 	return nil
 }
 
-func (m *CreateData) validateMgmtClusterKubeConfigPath(formats strfmt.Registry) error {
+func (m *CreateData) validateMgmtClusterKubeConfig(formats strfmt.Registry) error {
 
-	if swag.IsZero(m.MgmtClusterKubeConfigPath) { // not required
+	if swag.IsZero(m.MgmtClusterKubeConfig) { // not required
 		return nil
 	}
 
-	if err := validate.MinLength("mgmtClusterKubeConfigPath", "body", string(*m.MgmtClusterKubeConfigPath), 0); err != nil {
+	if err := validate.MinLength("mgmtClusterKubeConfig", "body", string(*m.MgmtClusterKubeConfig), 0); err != nil {
 		return err
 	}
 

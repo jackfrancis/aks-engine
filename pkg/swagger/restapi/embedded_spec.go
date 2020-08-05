@@ -106,7 +106,7 @@ func init() {
         "location": {
           "type": "string"
         },
-        "mgmtClusterKubeConfigPath": {
+        "mgmtClusterKubeConfig": {
           "type": "string"
         },
         "nodeVMType": {
@@ -252,7 +252,7 @@ func init() {
           "type": "string",
           "minLength": 0
         },
-        "mgmtClusterKubeConfigPath": {
+        "mgmtClusterKubeConfig": {
           "type": "string",
           "minLength": 0
         },

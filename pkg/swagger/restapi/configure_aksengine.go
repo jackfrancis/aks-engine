@@ -6,13 +6,13 @@ import (
 	"crypto/tls"
 	"net/http"
 
-	"github.com/Azure/aks-engine/cmd"
+	"github.com/Azure/aks-engine/pkg/swagger/models"
+	"github.com/Azure/aks-engine/pkg/v2/engine"
 	"github.com/Azure/go-autorest/autorest/to"
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 
-	"github.com/Azure/aks-engine/pkg/swagger/models"
 	"github.com/Azure/aks-engine/pkg/swagger/restapi/operations"
 )
 
@@ -41,50 +41,51 @@ func configureAPI(api *operations.AksengineAPI) http.Handler {
 	api.JSONProducer = runtime.JSONProducer()
 
 	api.CreateClusterHandler = operations.CreateClusterHandlerFunc(func(params operations.CreateClusterParams) middleware.Responder {
-		if to.String(params.Body.AzureEnvironment) == "" {
-			params.Body.AzureEnvironment = to.StringPtr(cmd.DefaultAzureEnvironment)
+		clusterSpec := models.CreateData{
+			MgmtClusterKubeConfig: params.Body.MgmtClusterKubeConfig,
+			SubscriptionID:        params.Body.SubscriptionID,
+			TenantID:              params.Body.TenantID,
+			ClientID:              params.Body.ClientID,
+			ClientSecret:          params.Body.ClientSecret,
+			AzureEnvironment:      params.Body.AzureEnvironment,
+			ClusterName:           params.Body.ClusterName,
+			VnetName:              params.Body.VnetName,
+			ResourceGroup:         params.Body.ResourceGroup,
+			Location:              params.Body.Location,
+			ControlPlaneVMType:    params.Body.ControlPlaneVMType,
+			NodeVMType:            params.Body.NodeVMType,
+			SSHPublicKey:          params.Body.SSHPublicKey,
+			KubernetesVersion:     params.Body.KubernetesVersion,
+			ControlPlaneNodes:     params.Body.ControlPlaneNodes,
+			Nodes:                 params.Body.Nodes,
 		}
-		if to.String(params.Body.Location) == "" {
-			params.Body.Location = to.StringPtr(cmd.DefaultLocation)
+		if to.String(clusterSpec.AzureEnvironment) == "" {
+			clusterSpec.AzureEnvironment = to.StringPtr(engine.DefaultAzureEnvironment)
 		}
-		if to.String(params.Body.ControlPlaneVMType) == "" {
-			params.Body.ControlPlaneVMType = to.StringPtr(cmd.DefaultControlPlaneVMType)
+		if to.String(clusterSpec.Location) == "" {
+			clusterSpec.Location = to.StringPtr(engine.DefaultLocation)
 		}
-		if to.String(params.Body.NodeVMType) == "" {
-			params.Body.NodeVMType = to.StringPtr(cmd.DefaultNodeVMType)
+		if to.String(clusterSpec.ControlPlaneVMType) == "" {
+			clusterSpec.ControlPlaneVMType = to.StringPtr(engine.DefaultControlPlaneVMType)
 		}
-		if to.String(params.Body.KubernetesVersion) == "" {
-			params.Body.KubernetesVersion = to.StringPtr(cmd.DefaultKubernetesVersion)
+		if to.String(clusterSpec.NodeVMType) == "" {
+			clusterSpec.NodeVMType = to.StringPtr(engine.DefaultNodeVMType)
 		}
-		if params.Body.ControlPlaneNodes == 0 {
-			params.Body.ControlPlaneNodes = int64(cmd.DefaultControlPlaneNodes)
+		if to.String(clusterSpec.KubernetesVersion) == "" {
+			clusterSpec.KubernetesVersion = to.StringPtr(engine.DefaultKubernetesVersion)
 		}
-		if params.Body.Nodes == 0 {
-			params.Body.Nodes = int64(cmd.DefaultNodes)
+		if clusterSpec.ControlPlaneNodes == 0 {
+			clusterSpec.ControlPlaneNodes = int64(engine.DefaultControlPlaneNodes)
+		}
+		if clusterSpec.Nodes == 0 {
+			clusterSpec.Nodes = int64(engine.DefaultNodes)
 		}
 
-		cc := cmd.CreateCmd{
-			MgmtClusterKubeConfigPath: to.String(params.Body.MgmtClusterKubeConfigPath),
-			SubscriptionID:            to.String(params.Body.SubscriptionID),
-			TenantID:                  to.String(params.Body.TenantID),
-			ClientID:                  to.String(params.Body.ClientID),
-			ClientSecret:              to.String(params.Body.ClientSecret),
-			AzureEnvironment:          to.String(params.Body.AzureEnvironment),
-			ClusterName:               to.String(params.Body.ClusterName),
-			VnetName:                  to.String(params.Body.VnetName),
-			ResourceGroup:             to.String(params.Body.ResourceGroup),
-			Location:                  to.String(params.Body.Location),
-			ControlPlaneVMType:        to.String(params.Body.ControlPlaneVMType),
-			NodeVMType:                to.String(params.Body.NodeVMType),
-			SSHPublicKey:              to.String(params.Body.SSHPublicKey),
-			KubernetesVersion:         "1.17.8",
-			ControlPlaneNodes:         int(params.Body.ControlPlaneNodes),
-			Nodes:                     int(params.Body.Nodes),
-		}
-		err := cc.Run()
+		cluster := engine.NewCluster(clusterSpec)
+		err := cluster.Create()
 		if err != nil {
 			return operations.NewCreateClusterOK().WithPayload(&models.CreateData{
-				ClusterName: to.StringPtr(cc.ClusterName),
+				ClusterName: to.StringPtr(to.String(clusterSpec.ClusterName)),
 			})
 		}
 		return operations.NewCreateClusterDefault(http.StatusInternalServerError)

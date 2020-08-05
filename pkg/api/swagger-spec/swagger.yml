@@ -44,7 +44,7 @@ definitions:
   createData:
     type: object
     properties:
-      mgmtClusterKubeConfigPath:
+      mgmtClusterKubeConfig:
         type: string
         minLength: 0
       subscriptionID:
