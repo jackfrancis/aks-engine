@@ -113,7 +113,6 @@ func (c *cluster) Create() error {
 		log.Printf("Unable to get home dir: %s\n", err)
 		return err
 	}
-	fmt.Println(to.String(c.spec.MgmtClusterKubeConfig))
 	if to.String(c.spec.MgmtClusterKubeConfig) == "" {
 		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(true)
 		c.mgmtClusterName = fmt.Sprintf("capi-mgmt-%s", strconv.Itoa(int(time.Now().Unix())))
@@ -153,33 +152,6 @@ func (c *cluster) Create() error {
 	}
 	config, err := clientcmd.NewClientConfigFromBytes([]byte(to.String(c.spec.MgmtClusterKubeConfig)))
 	if err != nil {
-		return err
-	}
-	thing, err := config.ClientConfig()
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%#v\n", thing)
-	mgmtClusterKubeConfig, err := config.RawConfig()
-	if err != nil {
-		log.Printf("Unable to load mgmt cluster kubeconfig: %s\n", err)
-		return err
-	}
-	if c.mgmtClusterName != "" && c.mgmtClusterName != mgmtClusterKubeConfig.CurrentContext {
-		log.Printf("Got unexpected AKS management cluster kubeconfig")
-		return err
-	}
-	c.mgmtClusterName = mgmtClusterKubeConfig.CurrentContext
-	fmt.Println(c.mgmtClusterName)
-	for name, cluster := range mgmtClusterKubeConfig.Clusters {
-		if name == c.mgmtClusterName {
-			c.createStatus.mgmtClusterURL = cluster.Server
-		}
-	}
-	fmt.Println(c.createStatus.mgmtClusterURL)
-	fmt.Println(c.createStatus.mgmtClusterKubeConfigPath)
-	if c.createStatus.mgmtClusterURL == "" {
-		log.Printf("Malformed kubeconfig: %s\n", err)
 		return err
 	}
 	restConfig, err := config.ClientConfig()
@@ -262,6 +234,7 @@ func (c *cluster) Create() error {
 	}
 	if to.Bool(c.createStatus.mgmtClusterNeedsClusterAPIInit) {
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.mgmtClusterKubeConfigPath, "--infrastructure", "azure")
+		fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
