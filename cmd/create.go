@@ -7,6 +7,9 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/Azure/aks-engine/pkg/swagger/models"
@@ -107,6 +110,10 @@ func newCreateCmd() *cobra.Command {
 }
 
 func (cc *CreateCmd) Run() error {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return errors.Errorf("Unable to get home dir: %s\n", err)
+	}
 	var mgmtClusterKubeConfig string
 	if cc.MgmtClusterKubeConfigPath != "" {
 		b, err := ioutil.ReadFile(cc.MgmtClusterKubeConfigPath)
@@ -133,15 +140,19 @@ func (cc *CreateCmd) Run() error {
 		ControlPlaneNodes:     int64(cc.ControlPlaneNodes),
 		Nodes:                 int64(cc.Nodes),
 	})
-	//green := color.New(color.FgGreen).SprintFunc()
+	green := color.New(color.FgGreen).SprintFunc()
 	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
 	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
-	//bold := color.New(color.FgWhite, color.Bold).SprintFunc()
+	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	clusterCreateDoneChannel := make(chan error)
-	mgmtclusterReadyChannel := make(chan error)
-	clusterReadyChannel := make(chan error)
+	mgmtClusterConfigValidated := make(chan struct{})
+	mgmtClusterReady := make(chan struct{})
+	mgmtClusterEvaluatedForClusterAPIReadiness := make(chan struct{})
+	mgmtClusterReadyForClusterAPI := make(chan struct{})
+	clusterConfigGenerated := make(chan struct{})
+	clusterProvisioning := make(chan struct{})
 	go func() {
 		for {
 			select {
@@ -156,19 +167,14 @@ func (cc *CreateCmd) Run() error {
 		}
 	}()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-		defer cancel()
-		mgmtClusterNeedsClusterAPIInitChannel := make(chan *bool)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				mgmtClusterNeedsClusterAPIInitChannel <- cluster.MgmtClusterNeedsClusterAPIInit()
-				if needsInit := <-mgmtClusterNeedsClusterAPIInitChannel; needsInit != nil {
-					if to.Bool(needsInit) {
-						fmt.Printf("\nWill create cluster-api components on mgmt cluster.\n")
-					}
+				if cluster.GetMgmtClusterName() != "" && cluster.GetMgmtClusterURL() != "" {
+					fmt.Printf("\nChecking if management cluster %s is ready at %s...\n", magentabold(cluster.GetMgmtClusterName()), bold(cluster.GetMgmtClusterURL()))
+					mgmtClusterConfigValidated <- struct{}{}
 					return
 				}
 				time.Sleep(1 * time.Second)
@@ -176,8 +182,6 @@ func (cc *CreateCmd) Run() error {
 		}
 	}()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-		defer cancel()
 		needsPivotChannel := make(chan *bool)
 		for {
 			select {
@@ -200,9 +204,10 @@ func (cc *CreateCmd) Run() error {
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				mgmtclusterReadyChannel <- cluster.IsMgmtClusterReady(1*time.Second, 20*time.Minute)
-				if err := <-mgmtclusterReadyChannel; err == nil {
+			case <-mgmtClusterConfigValidated:
+				if err := cluster.IsMgmtClusterReady(1*time.Second, 20*time.Minute); err == nil {
+					fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+					mgmtClusterReady <- struct{}{}
 					return
 				}
 			}
@@ -214,16 +219,111 @@ func (cc *CreateCmd) Run() error {
 			case <-ctx.Done():
 				return
 			default:
-				clusterReadyChannel <- cluster.IsReady(1*time.Second, 20*time.Minute)
-				if ready := <-clusterReadyChannel; ready == nil {
+				if cluster.MgmtClusterNeedsClusterAPIInit() != nil {
+					mgmtClusterEvaluatedForClusterAPIReadiness <- struct{}{}
+				}
+				time.Sleep(1 * time.Second)
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-mgmtClusterReady:
+				fmt.Printf("\nChecking if management cluster %s is cluster-api-ready...\n", magentabold(cluster.GetMgmtClusterName()))
+			case <-mgmtClusterEvaluatedForClusterAPIReadiness:
+				if to.Bool(cluster.MgmtClusterNeedsClusterAPIInit()) {
+					fmt.Printf("\nInstalling cluster-api components on management cluster %s...\n", magentabold(cluster.GetMgmtClusterName()))
+				} else {
+					fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+					mgmtClusterReadyForClusterAPI <- struct{}{}
+				}
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-mgmtClusterReadyForClusterAPI:
+				if err := cluster.IsMgmtClusterReady(1*time.Second, 20*time.Minute); err == nil {
+					fmt.Printf("\nGenerating Azure cluster-api config for new cluster %s...\n", yellowbold(cluster.GetName()))
 					return
 				}
 			}
 		}
 	}()
-	if cc.MgmtClusterKubeConfigPath == "" {
-		fmt.Printf("\nWill create a temporary AKS management cluster to install cluster-api management components.\n")
-	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if cluster.GetClusterConfig() != nil {
+					clusterConfigGenerated <- struct{}{}
+					return
+				}
+				time.Sleep(1 * time.Second)
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-clusterConfigGenerated:
+				fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+				fmt.Printf("\nCreating cluster %s on cluster-api management cluster %s...\n", yellowbold(cluster.GetName()), magentabold(cluster.GetMgmtClusterName()))
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if to.Bool(cluster.IsProvisioning()) {
+					clusterProvisioning <- struct{}{}
+					return
+				}
+				time.Sleep(1 * time.Second)
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-clusterConfigGenerated:
+				fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+				fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster %s...\n", yellowbold(cluster.GetName()), magentabold(cluster.GetMgmtClusterName()))
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if cluster.GetClient() != nil {
+					fmt.Printf("\n%s\n", green("⎈⎈⎈"))
+					fmt.Printf("\nWaiting for cluster %s to become ready...\n", yellowbold(cluster.GetName()))
+					return
+				}
+				time.Sleep(1 * time.Second)
+			}
+		}
+	}()
 	for {
 		select {
 		case err := <-clusterCreateDoneChannel:
@@ -232,13 +332,9 @@ func (cc *CreateCmd) Run() error {
 			}
 			fmt.Printf("\nYour new cluster %s is ready!\n", yellowbold(cluster.GetName()))
 			fmt.Printf("\nE.g.:\n")
-			//cmd = exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", c.createStatus.kubeConfigPath), "get", "nodes", "-o", "wide")
-			//fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
+			cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", fmt.Sprintf("%s/.kube/%s.kubeconfig", h, cluster.GetName())), "get", "nodes", "-o", "wide")
+			fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 			return nil
-		case mgmtClusterIsReady := <-mgmtclusterReadyChannel:
-			if mgmtClusterIsReady == nil {
-				fmt.Printf("\nmanagement cluster %s is cluster-api-ready.\n", magentabold(cluster.GetMgmtClusterName()))
-			}
 		case <-ctx.Done():
 			return errors.Errorf("create cluster timed out")
 		}

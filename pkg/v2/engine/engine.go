@@ -60,23 +60,27 @@ type AzureJSON struct {
 
 type Cluster interface {
 	Create() error
-	GetKubeConfig(string, string, time.Duration, time.Duration) (string, error)
+	GetKubeConfig(time.Duration, time.Duration) (string, error)
 	IsReady(sleep, timeout time.Duration) error
+	ApplyClusterAPIConfig(time.Duration, time.Duration) error
+	IsProvisioning() *bool
 	IsMgmtClusterReady(sleep, timeout time.Duration) error
 	MgmtClusterNeedsClusterAPIInit() *bool
 	NeedsPivot() *bool
 	GetName() string
 	GetMgmtClusterName() string
+	GetMgmtClusterURL() string
+	GetClusterConfig() []byte
+	GetClient() *kubernetes.Clientset
 }
 
 type createStatus struct {
 	mgmtClusterKubeConfigPath      string
-	mgmtClusterURL                 string
 	mgmtClusterNeedsClusterAPIInit *bool
 	mgmtClusterClient              *kubernetes.Clientset
-	newClusterClient               *kubernetes.Clientset
 	clusterConfigYaml              []byte // TODO strongly type this
 	kubeConfig                     []byte // TODO strongly type this
+	clusterConfigApplied           *bool
 	needsPivot                     *bool
 	localClusterAPIReady           *bool
 	pivotComplete                  *bool
@@ -88,6 +92,8 @@ type cluster struct {
 	spec            models.CreateData
 	createStatus    createStatus
 	mgmtClusterName string
+	mgmtClusterURL  string
+	client          *kubernetes.Clientset
 }
 
 func NewCluster(spec models.CreateData) Cluster {
@@ -150,19 +156,25 @@ func (c *cluster) Create() error {
 			return err
 		}
 	}
-	config, err := clientcmd.NewClientConfigFromBytes([]byte(to.String(c.spec.MgmtClusterKubeConfig)))
+	clientConfig, err := clientcmd.NewClientConfigFromBytes([]byte(to.String(c.spec.MgmtClusterKubeConfig)))
 	if err != nil {
 		return err
 	}
-	restConfig, err := config.ClientConfig()
+	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
 		return err
 	}
+	config, err := clientConfig.RawConfig()
+	if err != nil {
+		return err
+	}
+	c.mgmtClusterURL = restConfig.Host
+	c.mgmtClusterName = config.CurrentContext
 	c.createStatus.mgmtClusterClient, err = kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return err
 	}
-	err = c.IsMgmtClusterReady(30*time.Second, 20*time.Minute)
+	err = c.IsMgmtClusterReady(5*time.Second, 20*time.Minute)
 	if err != nil {
 		log.Printf("management cluster %s not ready in 20 mins: %s\n", c.mgmtClusterName, err)
 		return err
@@ -241,6 +253,8 @@ func (c *cluster) Create() error {
 			log.Printf("Unable to initialize management cluster %s for Azure: %s\n", c.mgmtClusterName, err)
 			return err
 		}
+	} else {
+		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(false)
 	}
 	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", to.String(c.spec.ClusterName), "--kubernetes-version", fmt.Sprintf("v%s", to.String(c.spec.KubernetesVersion)), "--control-plane-machine-count", strconv.Itoa(int(c.spec.ControlPlaneNodes)), "--worker-machine-count", strconv.Itoa(int(c.spec.Nodes)))
 	c.createStatus.clusterConfigYaml, err = cmd.CombinedOutput()
@@ -249,26 +263,12 @@ func (c *cluster) Create() error {
 		log.Printf("Unable to generate cluster config: %s\n", err)
 		return err
 	}
-	clusterConfigYaml := fmt.Sprintf("%s.yaml", to.String(c.spec.ClusterName))
-	f, err := os.Create(clusterConfigYaml)
+	err = c.ApplyClusterAPIConfig(3*time.Second, 5*time.Minute)
 	if err != nil {
-		log.Printf("Unable to create and open cluster config file for writing: %s\n", err)
+		log.Printf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.mgmtClusterName, err)
 		return err
 	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			panic(err)
-		}
-	}()
-	if _, err := f.Write(c.createStatus.clusterConfigYaml); err != nil {
-		panic(err)
-	}
-	err = applyKubeSpecWithRetry(c.createStatus.mgmtClusterKubeConfigPath, clusterConfigYaml, 3*time.Second, 5*time.Minute)
-	if err != nil {
-		log.Printf("Unable to apply cluster config at path %s to cluster-api management cluster %s: %s\n", err, clusterConfigYaml, c.mgmtClusterName)
-		return err
-	}
-	secret, err := c.GetKubeConfig(c.createStatus.mgmtClusterKubeConfigPath, to.String(c.spec.ClusterName), 30*time.Second, 20*time.Minute)
+	secret, err := c.GetKubeConfig(30*time.Second, 20*time.Minute)
 	if err != nil {
 		log.Printf("Unable to get cluster %s kubeconfig from cluster-api management cluster %s: %s\n", yellowbold(to.String(c.spec.ClusterName)), yellowbold(c.mgmtClusterName), err)
 		return err
@@ -277,15 +277,15 @@ func (c *cluster) Create() error {
 	if err != nil {
 		log.Printf("Unable to decode cluster %s kubeconfig: %s\n", to.String(c.spec.ClusterName), err)
 	}
-	config, err = clientcmd.NewClientConfigFromBytes(c.createStatus.kubeConfig)
+	clientConfigNewCluster, err := clientcmd.NewClientConfigFromBytes(c.createStatus.kubeConfig)
 	if err != nil {
 		return err
 	}
-	restConfig, err = config.ClientConfig()
+	restConfigNewCluster, err := clientConfigNewCluster.ClientConfig()
 	if err != nil {
 		return err
 	}
-	c.createStatus.newClusterClient, err = kubernetes.NewForConfig(restConfig)
+	c.client, err = kubernetes.NewForConfig(restConfigNewCluster)
 	if err != nil {
 		return err
 	}
@@ -373,13 +373,13 @@ func getClusterKubeConfig(cmdArgs []string) getClusterKubeConfigSecretResult {
 }
 
 // GetKubeConfig will return the cluster kubeconfig, retrying up to a timeout
-func (c *cluster) GetKubeConfig(mgmtClusterKubeConfigPath, clusterName string, sleep, timeout time.Duration) (string, error) {
+func (c *cluster) GetKubeConfig(sleep, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	ch := make(chan getClusterKubeConfigSecretResult)
 	var mostRecentGetClusterKubeConfigWithRetryError error
 	var secret string
-	cmdArgs := append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", clusterName), "-o", "jsonpath={.data.value}")
+	cmdArgs := append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", c.createStatus.mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", to.String(c.spec.ClusterName)), "-o", "jsonpath={.data.value}")
 	go func() {
 		for {
 			select {
@@ -420,7 +420,7 @@ func isClusterReady(client *kubernetes.Clientset) error {
 
 // IsReady will return if the new cluster is ready, retrying up to a timeout
 func (c *cluster) IsReady(sleep, timeout time.Duration) error {
-	if c.createStatus.newClusterClient == nil {
+	if c.GetClient() == nil {
 		return errors.Errorf("no k8s client")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -433,7 +433,7 @@ func (c *cluster) IsReady(sleep, timeout time.Duration) error {
 			case <-ctx.Done():
 				return
 			default:
-				ch <- isClusterReady(c.createStatus.newClusterClient)
+				ch <- isClusterReady(c.client)
 				time.Sleep(sleep)
 			}
 		}
@@ -492,6 +492,25 @@ func (c *cluster) GetMgmtClusterName() string {
 	return c.mgmtClusterName
 }
 
+// GetMgmtClusterURL will return the URL of the mgmt cluster
+func (c *cluster) GetMgmtClusterURL() string {
+	return c.mgmtClusterURL
+}
+
+// GetClusterConfig returns the raw cluster config
+func (c *cluster) GetClusterConfig() []byte {
+	return c.createStatus.clusterConfigYaml
+}
+
+// GetClient returns the k8s client instance
+func (c *cluster) GetClient() *kubernetes.Clientset {
+	return c.client
+}
+
+func (c *cluster) IsProvisioning() *bool {
+	return c.createStatus.clusterConfigApplied
+}
+
 func (c *cluster) MgmtClusterNeedsClusterAPIInit() *bool {
 	return c.createStatus.mgmtClusterNeedsClusterAPIInit
 }
@@ -518,8 +537,22 @@ func applyKubeSpec(kubeconfigPath, yamlSpecPath string) isExecNonZeroExitResult 
 	}
 }
 
-// applyKubeSpecWithRetry will run kubectl apply -f against given kubeconfig, retrying up to a timeout
-func applyKubeSpecWithRetry(kubeconfigPath, yamlSpecPath string, sleep, timeout time.Duration) error {
+// ApplyClusterAPIConfig will run kubectl apply -f against given kubeconfig, retrying up to a timeout
+func (c *cluster) ApplyClusterAPIConfig(sleep, timeout time.Duration) error {
+	clusterConfigYaml := fmt.Sprintf("%s.yaml", to.String(c.spec.ClusterName))
+	f, err := os.Create(clusterConfigYaml)
+	if err != nil {
+		log.Printf("Unable to create and open cluster config file for writing: %s\n", err)
+		return err
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			panic(err)
+		}
+	}()
+	if _, err := f.Write(c.createStatus.clusterConfigYaml); err != nil {
+		panic(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	ch := make(chan isExecNonZeroExitResult)
@@ -531,7 +564,7 @@ func applyKubeSpecWithRetry(kubeconfigPath, yamlSpecPath string, sleep, timeout 
 			case <-ctx.Done():
 				return
 			default:
-				ch <- applyKubeSpec(kubeconfigPath, yamlSpecPath)
+				ch <- applyKubeSpec(c.createStatus.mgmtClusterKubeConfigPath, clusterConfigYaml)
 				time.Sleep(sleep)
 			}
 		}
@@ -542,6 +575,7 @@ func applyKubeSpecWithRetry(kubeconfigPath, yamlSpecPath string, sleep, timeout 
 			mostRecentApplyKubeSpecWithRetryError = result.err
 			stdout = result.stdout
 			if mostRecentApplyKubeSpecWithRetryError == nil {
+				c.createStatus.clusterConfigApplied = to.BoolPtr(true)
 				return nil
 			}
 		case <-ctx.Done():
