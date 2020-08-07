@@ -15,6 +15,7 @@ import (
 	"github.com/Azure/aks-engine/pkg/swagger/models"
 	"github.com/Azure/aks-engine/pkg/v2/engine"
 	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/briandowns/spinner"
 	"github.com/fatih/color"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -25,6 +26,11 @@ const (
 	createShortDescription = "Create a new Kubernetes cluster"
 	createLongDescription  = "Create a new Kubernetes cluster, enabled with cluster-api for cluster lifecycle management"
 	calicoSpec             = "https://raw.githubusercontent.com/kubernetes-sigs/cluster-api-provider-azure/master/templates/addons/calico.yaml"
+)
+
+const (
+	reconcile    bool = true
+	validateOnce bool = false
 )
 
 type CreateCmd struct {
@@ -109,6 +115,118 @@ func newCreateCmd() *cobra.Command {
 	return createCmd
 }
 
+type phaseReady func(engine.Cluster) bool
+
+func validateClusterConfig(c engine.Cluster) bool {
+	return c.GetClusterConfig() != nil
+}
+
+func validateMgmtClusterConfig(c engine.Cluster) bool {
+	return c.GetMgmtClusterName() != "" && c.GetMgmtClusterURL() != ""
+}
+
+func validateMgmtClusterReady(c engine.Cluster) bool {
+	if err := c.IsMgmtClusterReady(1*time.Second, 20*time.Minute); err == nil {
+		return true
+	}
+	return false
+}
+
+func validateMgmtClusterForClusterAPIReadiness(c engine.Cluster) bool {
+	return c.MgmtClusterNeedsClusterAPIInit() != nil
+}
+
+func validateMgmtClusterNeedsClusterAPIComponents(c engine.Cluster) bool {
+	return c.MgmtClusterNeedsClusterAPIInit() != nil && to.Bool(c.MgmtClusterNeedsClusterAPIInit())
+}
+
+func validateMgmtClusterReadyForClusterAPI(c engine.Cluster) bool {
+	return c.IsMgmtClusterAPIReady() != nil && to.Bool(c.IsMgmtClusterAPIReady())
+}
+
+func validateIsProvisioning(c engine.Cluster) bool {
+	return to.Bool(c.IsProvisioning())
+}
+
+func validateReady(ctx context.Context, c engine.Cluster, ready phaseReady) bool {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			if ready(c) {
+				return true
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
+
+func validatePhaseProgress(ctx context.Context, c engine.Cluster, input, output chan struct{}, ready phaseReady, validateContinually bool, phaseMessage, inputMessage, outputMessage *string) {
+	go func() {
+		s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
+		defer s.Stop()
+		if phaseMessage != nil {
+			fmt.Printf("\n%s\n", to.String(phaseMessage))
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-input:
+				s.Start()
+				if inputMessage != nil {
+					fmt.Printf("\n%s\n", to.String(inputMessage))
+				}
+				if validateContinually {
+					if ready == nil || validateReady(ctx, c, ready) {
+						if outputMessage != nil {
+							fmt.Printf("\n%s\n", to.String(outputMessage))
+						}
+						output <- struct{}{}
+						return
+					}
+				} else {
+					if ready == nil || ready(c) {
+						if outputMessage != nil {
+							fmt.Printf("\n%s\n", to.String(outputMessage))
+						}
+						output <- struct{}{}
+					}
+					return
+				}
+			}
+		}
+	}()
+}
+
+func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{}, ready phaseReady, waitMessage, outputMessage *string) {
+	go func() {
+		s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
+		defer s.Stop()
+		if waitMessage != nil {
+			fmt.Printf("\n%s\n", to.String(waitMessage))
+		}
+		s.Start()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if ready == nil || ready(c) {
+					if outputMessage != nil {
+						fmt.Printf("\n%s\n", to.String(outputMessage))
+					}
+					if output != nil {
+						output <- struct{}{}
+					}
+					return
+				}
+			}
+		}
+	}()
+}
+
 func (cc *CreateCmd) Run() error {
 	h, err := os.UserHomeDir()
 	if err != nil {
@@ -140,9 +258,8 @@ func (cc *CreateCmd) Run() error {
 		ControlPlaneNodes:     int64(cc.ControlPlaneNodes),
 		Nodes:                 int64(cc.Nodes),
 	})
-	green := color.New(color.FgGreen).SprintFunc()
 	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
-	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
+	//magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
 	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
@@ -150,7 +267,8 @@ func (cc *CreateCmd) Run() error {
 	mgmtClusterConfigValidated := make(chan struct{})
 	mgmtClusterReady := make(chan struct{})
 	mgmtClusterEvaluatedForClusterAPIReadiness := make(chan struct{})
-	mgmtClusterReadyForClusterAPI := make(chan struct{})
+	mgmtClusterNeedsClusterAPI := make(chan struct{})
+	mgmtClusterAPIInstalled := make(chan struct{})
 	clusterConfigGenerated := make(chan struct{})
 	clusterProvisioning := make(chan struct{})
 	go func() {
@@ -166,164 +284,14 @@ func (cc *CreateCmd) Run() error {
 			}
 		}
 	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if cluster.GetMgmtClusterName() != "" && cluster.GetMgmtClusterURL() != "" {
-					fmt.Printf("\nChecking if management cluster %s is ready at %s...\n", magentabold(cluster.GetMgmtClusterName()), bold(cluster.GetMgmtClusterURL()))
-					mgmtClusterConfigValidated <- struct{}{}
-					return
-				}
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}()
-	go func() {
-		needsPivotChannel := make(chan *bool)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				needsPivotChannel <- cluster.NeedsPivot()
-				if needsPivot := <-needsPivotChannel; needsPivot != nil {
-					if to.Bool(needsPivot) {
-						fmt.Printf("\nWill install cluster-api components on target cluster.\n")
-					}
-					return
-				}
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-mgmtClusterConfigValidated:
-				if err := cluster.IsMgmtClusterReady(1*time.Second, 20*time.Minute); err == nil {
-					fmt.Printf("\n%s\n", green("⎈⎈⎈"))
-					mgmtClusterReady <- struct{}{}
-					return
-				}
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if cluster.MgmtClusterNeedsClusterAPIInit() != nil {
-					mgmtClusterEvaluatedForClusterAPIReadiness <- struct{}{}
-				}
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-mgmtClusterReady:
-				fmt.Printf("\nChecking if management cluster %s is cluster-api-ready...\n", magentabold(cluster.GetMgmtClusterName()))
-			case <-mgmtClusterEvaluatedForClusterAPIReadiness:
-				if to.Bool(cluster.MgmtClusterNeedsClusterAPIInit()) {
-					fmt.Printf("\nInstalling cluster-api components on management cluster %s...\n", magentabold(cluster.GetMgmtClusterName()))
-				} else {
-					fmt.Printf("\n%s\n", green("⎈⎈⎈"))
-					mgmtClusterReadyForClusterAPI <- struct{}{}
-				}
-				return
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-mgmtClusterReadyForClusterAPI:
-				if err := cluster.IsMgmtClusterReady(1*time.Second, 20*time.Minute); err == nil {
-					fmt.Printf("\nGenerating Azure cluster-api config for new cluster %s...\n", yellowbold(cluster.GetName()))
-					return
-				}
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if cluster.GetClusterConfig() != nil {
-					clusterConfigGenerated <- struct{}{}
-					return
-				}
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-clusterConfigGenerated:
-				fmt.Printf("\n%s\n", green("⎈⎈⎈"))
-				fmt.Printf("\nCreating cluster %s on cluster-api management cluster %s...\n", yellowbold(cluster.GetName()), magentabold(cluster.GetMgmtClusterName()))
-				return
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if to.Bool(cluster.IsProvisioning()) {
-					clusterProvisioning <- struct{}{}
-					return
-				}
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-clusterConfigGenerated:
-				fmt.Printf("\n%s\n", green("⎈⎈⎈"))
-				fmt.Printf("\nFetching kubeconfig for cluster %s from cluster-api management cluster %s...\n", yellowbold(cluster.GetName()), magentabold(cluster.GetMgmtClusterName()))
-				return
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if cluster.GetClient() != nil {
-					fmt.Printf("\n%s\n", green("⎈⎈⎈"))
-					fmt.Printf("\nWaiting for cluster %s to become ready...\n", yellowbold(cluster.GetName()))
-					return
-				}
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}()
+	waitForCondition(ctx, cluster, mgmtClusterConfigValidated, validateMgmtClusterConfig, nil, to.StringPtr("is mgmt cluster ready"))
+	validatePhaseProgress(ctx, cluster, mgmtClusterConfigValidated, mgmtClusterReady, validateMgmtClusterReady, reconcile, nil, to.StringPtr("mgmt cluster config validated"), to.StringPtr("mgmt cluster ready"))
+	validatePhaseProgress(ctx, cluster, mgmtClusterReady, mgmtClusterEvaluatedForClusterAPIReadiness, validateMgmtClusterForClusterAPIReadiness, reconcile, nil, nil, nil)
+	validatePhaseProgress(ctx, cluster, mgmtClusterEvaluatedForClusterAPIReadiness, mgmtClusterNeedsClusterAPI, validateMgmtClusterNeedsClusterAPIComponents, validateOnce, nil, to.StringPtr("ensuring cluster-api components are installed on mgmt cluster"), to.StringPtr("cluster-api components will be installed on mgmt cluster"))
+	validatePhaseProgress(ctx, cluster, mgmtClusterNeedsClusterAPI, mgmtClusterAPIInstalled, validateMgmtClusterReadyForClusterAPI, reconcile, nil, nil, to.StringPtr("cluster-api components installed on mgmt cluster"))
+	waitForCondition(ctx, cluster, clusterConfigGenerated, validateClusterConfig, nil, nil)
+	validatePhaseProgress(ctx, cluster, clusterConfigGenerated, nil, nil, reconcile, nil, nil, to.StringPtr("cluster config generated"))
+	waitForCondition(ctx, cluster, clusterProvisioning, validateIsProvisioning, nil, to.StringPtr("creating cluster"))
 	for {
 		select {
 		case err := <-clusterCreateDoneChannel:

@@ -14,6 +14,7 @@ require (
 	github.com/BurntSushi/toml v0.3.1
 	github.com/Jeffail/gabs v1.1.1
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/briandowns/spinner v1.11.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/dnaeon/go-vcr v1.0.1 // indirect
 	github.com/fatih/color v1.9.0

@@ -65,6 +65,7 @@ type Cluster interface {
 	ApplyClusterAPIConfig(time.Duration, time.Duration) error
 	IsProvisioning() *bool
 	IsMgmtClusterReady(sleep, timeout time.Duration) error
+	IsMgmtClusterAPIReady() *bool
 	MgmtClusterNeedsClusterAPIInit() *bool
 	NeedsPivot() *bool
 	GetName() string
@@ -78,6 +79,7 @@ type createStatus struct {
 	mgmtClusterKubeConfigPath      string
 	mgmtClusterNeedsClusterAPIInit *bool
 	mgmtClusterClient              *kubernetes.Clientset
+	mgmtClusterAPIReady            *bool
 	clusterConfigYaml              []byte // TODO strongly type this
 	kubeConfig                     []byte // TODO strongly type this
 	clusterConfigApplied           *bool
@@ -244,6 +246,9 @@ func (c *cluster) Create() error {
 			}
 		}
 	}
+	if c.createStatus.mgmtClusterNeedsClusterAPIInit == nil {
+		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(false)
+	}
 	if to.Bool(c.createStatus.mgmtClusterNeedsClusterAPIInit) {
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.mgmtClusterKubeConfigPath, "--infrastructure", "azure")
 		fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
@@ -253,9 +258,8 @@ func (c *cluster) Create() error {
 			log.Printf("Unable to initialize management cluster %s for Azure: %s\n", c.mgmtClusterName, err)
 			return err
 		}
-	} else {
-		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(false)
 	}
+	c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
 	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", to.String(c.spec.ClusterName), "--kubernetes-version", fmt.Sprintf("v%s", to.String(c.spec.KubernetesVersion)), "--control-plane-machine-count", strconv.Itoa(int(c.spec.ControlPlaneNodes)), "--worker-machine-count", strconv.Itoa(int(c.spec.Nodes)))
 	c.createStatus.clusterConfigYaml, err = cmd.CombinedOutput()
 	if err != nil {
@@ -513,6 +517,10 @@ func (c *cluster) IsProvisioning() *bool {
 
 func (c *cluster) MgmtClusterNeedsClusterAPIInit() *bool {
 	return c.createStatus.mgmtClusterNeedsClusterAPIInit
+}
+
+func (c *cluster) IsMgmtClusterAPIReady() *bool {
+	return c.createStatus.mgmtClusterAPIReady
 }
 
 func (c *cluster) NeedsPivot() *bool {
