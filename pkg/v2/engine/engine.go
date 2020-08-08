@@ -267,6 +267,7 @@ func (c *cluster) Create() error {
 		log.Printf("Unable to generate cluster config: %s\n", err)
 		return err
 	}
+	time.Sleep(2 * time.Minute)
 	err = c.ApplyClusterAPIConfig(3*time.Second, 5*time.Minute)
 	if err != nil {
 		log.Printf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.mgmtClusterName, err)
@@ -321,6 +322,9 @@ func (c *cluster) Create() error {
 	}
 
 	if to.Bool(c.createStatus.needsPivot) {
+		if err := waitForMachineDeploymentReplicas(1, c.createStatus.mgmtClusterKubeConfigPath, 10*time.Second, 20*time.Minute); err != nil {
+			return err
+		}
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.kubeConfigPath, "--infrastructure", "azure")
 		fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 		out, err := cmd.CombinedOutput()
@@ -665,6 +669,50 @@ func getAKSMgmtClusterCredsWithRetry(name, kubeconfig string, sleep, timeout tim
 		case <-ctx.Done():
 			fmt.Printf("%s\n", string(stdout))
 			return errors.Errorf("getAKSMgmtClusterCredsWithRetry timed out: %s\n", mostRecentGetAKSMgmtClusterCredsWithRetryError)
+		}
+	}
+}
+
+func getMachineDeploymentReplicas(kubeconfigPath string) isExecNonZeroExitResult {
+	cmd := exec.Command("kubectl", "--kubeconfig", kubeconfigPath, "get", "machinedeployments", "-o", "custom-columns=REPLICAS:.status.readyReplicas", "--no-headers=true")
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// waitForMachineDeploymentReplicas waits for a minimum number of machinedeployment replicas, retrying up to a timeout
+func waitForMachineDeploymentReplicas(num int, kubeconfigPath string, sleep, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentwaitForMachineDeploymentReplicasWithRetryError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- getMachineDeploymentReplicas(kubeconfigPath)
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentwaitForMachineDeploymentReplicasWithRetryError = result.err
+			stdout = result.stdout
+			if mostRecentwaitForMachineDeploymentReplicasWithRetryError == nil {
+				replicas, err := strconv.Atoi(strings.TrimSuffix(string(stdout), "\n"))
+				if err == nil && replicas > 0 {
+					return nil
+				}
+			}
+		case <-ctx.Done():
+			return errors.Errorf("waitForMachineDeploymentReplicas timed out: %s\n", mostRecentwaitForMachineDeploymentReplicasWithRetryError)
 		}
 	}
 }
