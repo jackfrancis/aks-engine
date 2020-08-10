@@ -267,7 +267,7 @@ func (c *cluster) Create() error {
 		log.Printf("Unable to generate cluster config: %s\n", err)
 		return err
 	}
-	time.Sleep(2 * time.Minute)
+	time.Sleep(10 * time.Second)
 	err = c.ApplyClusterAPIConfig(3*time.Second, 5*time.Minute)
 	if err != nil {
 		log.Printf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.mgmtClusterName, err)

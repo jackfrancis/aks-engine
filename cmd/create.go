@@ -223,6 +223,7 @@ func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{
 					return
 				}
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 }
