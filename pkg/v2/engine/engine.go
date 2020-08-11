@@ -63,6 +63,7 @@ type Cluster interface {
 	IsReady(sleep, timeout time.Duration) error
 	ApplyClusterAPIConfig(time.Duration, time.Duration) error
 	IsProvisioning() *bool
+	IsMgmtClusterProvisioning() *bool
 	IsMgmtClusterReady(sleep, timeout time.Duration) error
 	IsMgmtClusterAPIReady() *bool
 	MgmtClusterNeedsClusterAPIInit() *bool
@@ -79,6 +80,7 @@ type createStatus struct {
 	mgmtClusterNeedsClusterAPIInit *bool
 	mgmtClusterClient              *kubernetes.Clientset
 	mgmtClusterAPIReady            *bool
+	mgmtClusterIsProvisioning      *bool
 	clusterConfigYaml              []byte // TODO strongly type this
 	kubeConfig                     []byte // TODO strongly type this
 	clusterConfigApplied           *bool
@@ -130,6 +132,7 @@ func (c *cluster) Create() error {
 		if err != nil {
 			return errors.Errorf("Unable to create AKS management cluster: %s\n", err)
 		}
+		c.createStatus.mgmtClusterIsProvisioning = to.BoolPtr(true)
 		c.createStatus.mgmtClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, c.mgmtClusterName)
 		err = getAKSMgmtClusterCredsWithRetry(c.mgmtClusterName, c.createStatus.mgmtClusterKubeConfigPath, 5*time.Second, 10*time.Minute)
 		if err != nil {
@@ -245,11 +248,11 @@ func (c *cluster) Create() error {
 	}
 	if to.Bool(c.createStatus.mgmtClusterNeedsClusterAPIInit) {
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.mgmtClusterKubeConfigPath, "--infrastructure", "azure")
-		fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			return errors.Errorf("Unable to initialize management cluster %s for Azure: %s\n", c.mgmtClusterName, err)
 		}
+		time.Sleep(2 * time.Minute)
 	}
 	c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
 	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", to.String(c.spec.ClusterName), "--kubernetes-version", fmt.Sprintf("v%s", to.String(c.spec.KubernetesVersion)), "--control-plane-machine-count", strconv.Itoa(int(c.spec.ControlPlaneNodes)), "--worker-machine-count", strconv.Itoa(int(c.spec.Nodes)))
@@ -258,7 +261,6 @@ func (c *cluster) Create() error {
 		log.Printf("%\n", string(c.createStatus.clusterConfigYaml))
 		return errors.Errorf("Unable to generate cluster config: %s\n", err)
 	}
-	time.Sleep(2 * time.Minute)
 	err = c.ApplyClusterAPIConfig(3*time.Second, 5*time.Minute)
 	if err != nil {
 		return errors.Errorf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.mgmtClusterName, err)
@@ -312,7 +314,6 @@ func (c *cluster) Create() error {
 			return err
 		}
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.kubeConfigPath, "--infrastructure", "azure")
-		fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
@@ -321,7 +322,6 @@ func (c *cluster) Create() error {
 		c.createStatus.localClusterAPIReady = to.BoolPtr(true)
 		time.Sleep(1 * time.Minute)
 		cmd = exec.Command("clusterctl", "move", "--kubeconfig", c.createStatus.mgmtClusterKubeConfigPath, "--to-kubeconfig", c.createStatus.kubeConfigPath)
-		fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 		out, err = cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
@@ -497,6 +497,10 @@ func (c *cluster) GetClient() *kubernetes.Clientset {
 	return c.client
 }
 
+func (c *cluster) IsMgmtClusterProvisioning() *bool {
+	return c.createStatus.mgmtClusterIsProvisioning
+}
+
 func (c *cluster) IsProvisioning() *bool {
 	return c.createStatus.clusterConfigApplied
 }
@@ -614,7 +618,6 @@ func namespaceExistsWithRetry(kubeconfigPath, namespace string, sleep, timeout t
 
 func getAKSMgmtClusterCreds(name, kubeconfig string) isExecNonZeroExitResult {
 	cmd := exec.Command("az", "aks", "get-credentials", "-g", name, "-n", name, "-f", kubeconfig)
-	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 	out, err := cmd.CombinedOutput()
 	return isExecNonZeroExitResult{
 		stdout: out,
@@ -701,7 +704,6 @@ func waitForMachineDeploymentReplicas(num int, kubeconfigPath string, sleep, tim
 
 func createAKSMgmtClusterResourceGroup(name, location string) isExecNonZeroExitResult {
 	cmd := exec.Command("az", "group", "create", "-g", name, "-l", location)
-	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 	out, err := cmd.CombinedOutput()
 	return isExecNonZeroExitResult{
 		stdout: out,
@@ -711,7 +713,6 @@ func createAKSMgmtClusterResourceGroup(name, location string) isExecNonZeroExitR
 
 func deleteAKSMgmtClusterResourceGroup(name string) isExecNonZeroExitResult {
 	cmd := exec.Command("az", "group", "delete", "-g", name, "--no-wait", "-y")
-	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 	out, err := cmd.CombinedOutput()
 	return isExecNonZeroExitResult{
 		stdout: out,
@@ -787,7 +788,6 @@ func deleteAKSMgmtClusterResourceGroupWithRetry(name string, sleep, timeout time
 
 func createAKSMgmtCluster(name string) isExecNonZeroExitResult {
 	cmd := exec.Command("az", "aks", "create", "-g", name, "-n", name, "--kubernetes-version", "1.17.7", "-c", "1", "-s", "Standard_B2s")
-	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 	out, err := cmd.CombinedOutput()
 	return isExecNonZeroExitResult{
 		stdout: out,
@@ -797,7 +797,6 @@ func createAKSMgmtCluster(name string) isExecNonZeroExitResult {
 
 func deleteAKSMgmtCluster(name string) isExecNonZeroExitResult {
 	cmd := exec.Command("az", "aks", "delete", "-g", name, "-n", name, "--no-wait", "-y")
-	fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 	out, err := cmd.CombinedOutput()
 	return isExecNonZeroExitResult{
 		stdout: out,

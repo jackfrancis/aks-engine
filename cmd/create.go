@@ -116,6 +116,7 @@ func newCreateCmd() *cobra.Command {
 }
 
 type phaseReady func(engine.Cluster) bool
+type phaseMessage func(engine.Cluster)
 
 func validateClusterConfig(c engine.Cluster) bool {
 	return c.GetClusterConfig() != nil
@@ -144,8 +145,20 @@ func validateMgmtClusterReadyForClusterAPI(c engine.Cluster) bool {
 	return c.IsMgmtClusterAPIReady() != nil && to.Bool(c.IsMgmtClusterAPIReady())
 }
 
+func validateMgmtClusterIsProvisioning(c engine.Cluster) bool {
+	return to.Bool(c.IsMgmtClusterProvisioning())
+}
+
 func validateIsProvisioning(c engine.Cluster) bool {
 	return to.Bool(c.IsProvisioning())
+}
+
+func validateIsPivoting(c engine.Cluster) bool {
+	if to.Bool(c.NeedsPivot()) && to.Bool(c.IsProvisioning()) {
+		err := c.IsReady(30*time.Second, 20*time.Minute)
+		return err == nil
+	}
+	return false
 }
 
 func validateReady(ctx context.Context, c engine.Cluster, ready phaseReady) bool {
@@ -162,26 +175,31 @@ func validateReady(ctx context.Context, c engine.Cluster, ready phaseReady) bool
 	}
 }
 
-func validatePhaseProgress(ctx context.Context, c engine.Cluster, input, output chan struct{}, ready phaseReady, validateContinually bool, phaseMessage, inputMessage, outputMessage *string) {
+func validatePhaseProgress(ctx context.Context, c engine.Cluster, input, output chan struct{}, ready phaseReady, validateContinually bool, enterMessage, inputMessage, outputMessage phaseMessage) {
 	go func() {
-		s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
-		defer s.Stop()
-		if phaseMessage != nil {
-			fmt.Printf("\n%s\n", to.String(phaseMessage))
+		green := color.New(color.FgGreen).SprintFunc()
+		if enterMessage != nil {
+			fmt.Printf("\n")
+			enterMessage(c)
+			fmt.Printf("\n")
 		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-input:
-				s.Start()
 				if inputMessage != nil {
-					fmt.Printf("\n%s\n", to.String(inputMessage))
+					inputMessage(c)
 				}
 				if validateContinually {
 					if ready == nil || validateReady(ctx, c, ready) {
+						if inputMessage != nil {
+							fmt.Printf(" %s\n", green("✓"))
+						}
 						if outputMessage != nil {
-							fmt.Printf("\n%s\n", to.String(outputMessage))
+							fmt.Printf("\n")
+							outputMessage(c)
+							fmt.Printf("\n")
 						}
 						output <- struct{}{}
 						return
@@ -189,7 +207,9 @@ func validatePhaseProgress(ctx context.Context, c engine.Cluster, input, output 
 				} else {
 					if ready == nil || ready(c) {
 						if outputMessage != nil {
-							fmt.Printf("\n%s\n", to.String(outputMessage))
+							fmt.Printf("\n")
+							outputMessage(c)
+							fmt.Printf("\n")
 						}
 						output <- struct{}{}
 					}
@@ -200,14 +220,11 @@ func validatePhaseProgress(ctx context.Context, c engine.Cluster, input, output 
 	}()
 }
 
-func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{}, ready phaseReady, waitMessage, outputMessage *string) {
+func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{}, ready phaseReady, enterMessage, outputMessage phaseMessage) {
 	go func() {
-		s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
-		defer s.Stop()
-		if waitMessage != nil {
-			fmt.Printf("\n%s\n", to.String(waitMessage))
+		if enterMessage != nil {
+			enterMessage(c)
 		}
-		s.Start()
 		for {
 			select {
 			case <-ctx.Done():
@@ -215,7 +232,9 @@ func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{
 			default:
 				if ready == nil || ready(c) {
 					if outputMessage != nil {
-						fmt.Printf("\n%s\n", to.String(outputMessage))
+						fmt.Printf("\n")
+						outputMessage(c)
+						fmt.Printf("\n")
 					}
 					if output != nil {
 						output <- struct{}{}
@@ -229,9 +248,14 @@ func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{
 }
 
 func (cc *CreateCmd) Run() error {
-	h, err := os.UserHomeDir()
+	fmt.Printf("\n")
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return errors.Errorf("Unable to get home dir: %s\n", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return errors.Errorf("Unable to get current working dir: %s\n", err)
 	}
 	var mgmtClusterKubeConfig string
 	if cc.MgmtClusterKubeConfigPath != "" {
@@ -260,11 +284,14 @@ func (cc *CreateCmd) Run() error {
 		Nodes:                 int64(cc.Nodes),
 	})
 	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
-	//magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
+	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
 	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
+	s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
+	s.Color("yellow")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	clusterCreateDoneChannel := make(chan error)
+	mgmtClusterProvisioning := make(chan struct{})
 	mgmtClusterConfigValidated := make(chan struct{})
 	mgmtClusterReady := make(chan struct{})
 	mgmtClusterEvaluatedForClusterAPIReadiness := make(chan struct{})
@@ -285,23 +312,65 @@ func (cc *CreateCmd) Run() error {
 			}
 		}
 	}()
-	waitForCondition(ctx, cluster, mgmtClusterConfigValidated, validateMgmtClusterConfig, nil, to.StringPtr("is mgmt cluster ready"))
-	validatePhaseProgress(ctx, cluster, mgmtClusterConfigValidated, mgmtClusterReady, validateMgmtClusterReady, reconcile, nil, to.StringPtr("mgmt cluster config validated"), to.StringPtr("mgmt cluster ready"))
-	validatePhaseProgress(ctx, cluster, mgmtClusterReady, mgmtClusterEvaluatedForClusterAPIReadiness, validateMgmtClusterForClusterAPIReadiness, reconcile, nil, nil, nil)
-	validatePhaseProgress(ctx, cluster, mgmtClusterEvaluatedForClusterAPIReadiness, mgmtClusterNeedsClusterAPI, validateMgmtClusterNeedsClusterAPIComponents, validateOnce, nil, to.StringPtr("ensuring cluster-api components are installed on mgmt cluster"), to.StringPtr("cluster-api components will be installed on mgmt cluster"))
-	validatePhaseProgress(ctx, cluster, mgmtClusterNeedsClusterAPI, mgmtClusterAPIInstalled, validateMgmtClusterReadyForClusterAPI, reconcile, nil, nil, to.StringPtr("cluster-api components installed on mgmt cluster"))
-	waitForCondition(ctx, cluster, clusterConfigGenerated, validateClusterConfig, nil, nil)
-	validatePhaseProgress(ctx, cluster, clusterConfigGenerated, nil, nil, reconcile, nil, nil, to.StringPtr("cluster config generated"))
-	waitForCondition(ctx, cluster, clusterProvisioning, validateIsProvisioning, nil, to.StringPtr("creating cluster"))
+	var mgmtClusterProvisionInfoMessage phaseMessage = func(c engine.Cluster) {
+		fmt.Printf("No management cluster provided: a temporary Kubernetes cluster will be created to enable a cluster-api-powered installation %s....\n", bold("☕"))
+		if !s.Active() {
+			s.Start()
+		}
+	}
+	var waitForMgmtClusterReadyMessage phaseMessage = func(c engine.Cluster) {
+		if s.Active() {
+			s.Stop()
+		}
+		fmt.Printf("Checking if management cluster %s is ready at %s....", magentabold(cluster.GetMgmtClusterName()), bold(cluster.GetMgmtClusterURL()))
+	}
+	var waitForMgmtClusterAPIReadyMessage phaseMessage = func(c engine.Cluster) {
+		fmt.Printf("Checking if management cluster %s is cluster-api-ready....", magentabold(cluster.GetMgmtClusterName()))
+	}
+	var clusterConfigGeneratedInfoMessage phaseMessage = func(c engine.Cluster) {
+		fmt.Printf("Cluster config generated for new cluster %s and saved to %s.", yellowbold(cluster.GetName()), bold(fmt.Sprintf("%s/%s.yaml", cwd, cluster.GetName())))
+	}
+	var clusterProvisioningMessage phaseMessage = func(c engine.Cluster) {
+		fmt.Printf("Creating cluster %s on cluster-api management cluster %s....", yellowbold(cluster.GetName()), magentabold(cluster.GetMgmtClusterName()))
+	}
+	var clusterProvisioningInfoMessage phaseMessage = func(c engine.Cluster) {
+		fmt.Printf("Management cluster %s is provisioning your new cluster %s! %s....\n", magentabold(cluster.GetMgmtClusterName()), yellowbold(cluster.GetName()), bold("☕"))
+		if !s.Active() {
+			s.Start()
+		}
+	}
+	var clusterPivotingInfoMessage phaseMessage = func(c engine.Cluster) {
+		if s.Active() {
+			s.Stop()
+		}
+		fmt.Printf("Installing cluster-api interfaces on new cluster %s %s....", yellowbold(cluster.GetName()), bold("☕"))
+		if !s.Active() {
+			s.Start()
+		}
+	}
+	if cc.MgmtClusterKubeConfigPath == "" {
+		waitForCondition(ctx, cluster, mgmtClusterProvisioning, validateMgmtClusterIsProvisioning, mgmtClusterProvisionInfoMessage, nil)
+	}
+	waitForCondition(ctx, cluster, mgmtClusterConfigValidated, validateMgmtClusterConfig, nil, nil)
+	validatePhaseProgress(ctx, cluster, mgmtClusterConfigValidated, mgmtClusterReady, validateMgmtClusterReady, reconcile, nil, waitForMgmtClusterReadyMessage, nil)
+	validatePhaseProgress(ctx, cluster, mgmtClusterReady, mgmtClusterEvaluatedForClusterAPIReadiness, validateMgmtClusterForClusterAPIReadiness, reconcile, nil, waitForMgmtClusterAPIReadyMessage, nil)
+	validatePhaseProgress(ctx, cluster, mgmtClusterEvaluatedForClusterAPIReadiness, mgmtClusterNeedsClusterAPI, validateMgmtClusterNeedsClusterAPIComponents, validateOnce, nil, nil, nil)
+	validatePhaseProgress(ctx, cluster, mgmtClusterNeedsClusterAPI, mgmtClusterAPIInstalled, validateMgmtClusterReadyForClusterAPI, reconcile, nil, nil, nil)
+	waitForCondition(ctx, cluster, clusterConfigGenerated, validateClusterConfig, nil, clusterConfigGeneratedInfoMessage)
+	validatePhaseProgress(ctx, cluster, clusterConfigGenerated, nil, nil, reconcile, nil, clusterProvisioningMessage, nil)
+	validatePhaseProgress(ctx, cluster, clusterConfigGenerated, nil, nil, reconcile, nil, clusterProvisioningMessage, nil)
+	waitForCondition(ctx, cluster, nil, validateIsPivoting, nil, clusterPivotingInfoMessage)
+	waitForCondition(ctx, cluster, clusterProvisioning, validateIsProvisioning, nil, clusterProvisioningInfoMessage)
 	for {
 		select {
 		case err := <-clusterCreateDoneChannel:
 			if err != nil {
 				return err
 			}
+			s.Stop()
 			fmt.Printf("\nYour new cluster %s is ready!\n", yellowbold(cluster.GetName()))
 			fmt.Printf("\nE.g.:\n")
-			cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", fmt.Sprintf("%s/.kube/%s.kubeconfig", h, cluster.GetName())), "get", "nodes", "-o", "wide")
+			cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", fmt.Sprintf("%s/.kube/%s.kubeconfig", homeDir, cluster.GetName())), "get", "nodes", "-o", "wide")
 			fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 			return nil
 		case <-ctx.Done():
