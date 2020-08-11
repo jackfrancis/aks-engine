@@ -18,7 +18,6 @@ import (
 
 	"github.com/Azure/aks-engine/pkg/swagger/models"
 	"github.com/Azure/go-autorest/autorest/to"
-	"github.com/fatih/color"
 	"github.com/pkg/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -105,7 +104,6 @@ func NewCluster(spec models.CreateData) Cluster {
 }
 
 func (c *cluster) Create() error {
-	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
 	if to.String(c.spec.ClusterName) == "" {
 		c.spec.ClusterName = to.StringPtr(fmt.Sprintf("k8s-%s", strconv.Itoa(int(time.Now().Unix()))))
 	}
@@ -118,8 +116,7 @@ func (c *cluster) Create() error {
 
 	h, err := os.UserHomeDir()
 	if err != nil {
-		log.Printf("Unable to get home dir: %s\n", err)
-		return err
+		return errors.Errorf("Unable to get home dir: %s\n", err)
 	}
 	if to.String(c.spec.MgmtClusterKubeConfig) == "" {
 		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(true)
@@ -127,13 +124,11 @@ func (c *cluster) Create() error {
 		c.createStatus.needsPivot = to.BoolPtr(true)
 		err = createAKSMgmtClusterResourceGroupWithRetry(c.mgmtClusterName, to.String(c.spec.Location), 30*time.Second, 3*time.Minute)
 		if err != nil {
-			log.Printf("Unable to create AKS management cluster resource group: %s\n", err)
-			return err
+			return errors.Errorf("Unable to create AKS management cluster resource group: %s\n", err)
 		}
 		err = createAKSMgmtClusterWithRetry(c.mgmtClusterName, 30*time.Second, 10*time.Minute)
 		if err != nil {
-			log.Printf("Unable to create AKS management cluster: %s\n", err)
-			return err
+			return errors.Errorf("Unable to create AKS management cluster: %s\n", err)
 		}
 		c.createStatus.mgmtClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, c.mgmtClusterName)
 		err = getAKSMgmtClusterCredsWithRetry(c.mgmtClusterName, c.createStatus.mgmtClusterKubeConfigPath, 5*time.Second, 10*time.Minute)
@@ -143,43 +138,42 @@ func (c *cluster) Create() error {
 		}
 		b, err := ioutil.ReadFile(c.createStatus.mgmtClusterKubeConfigPath)
 		if err != nil {
-			log.Printf("Unable to open mgmt cluster kubeconfig file for reading: %s\n", err)
-			return err
+			return errors.Errorf("Unable to open mgmt cluster kubeconfig file for reading: %s\n", err)
 		}
 		c.spec.MgmtClusterKubeConfig = to.StringPtr(string(b))
 	} else {
 		tmpfile, err := ioutil.TempFile("", "tmp.kubeconfig")
 		if err != nil {
-			return err
+			return errors.Errorf("Unable to create temp kubeconfig: %s\n", err)
 		}
 		c.createStatus.mgmtClusterKubeConfigPath = tmpfile.Name()
 		defer os.Remove(c.createStatus.mgmtClusterKubeConfigPath)
 		if _, err := tmpfile.Write([]byte(to.String(c.spec.MgmtClusterKubeConfig))); err != nil {
-			return err
+			return errors.Errorf("Unable to write temp kubeconfig file: %s\n", err)
 		}
 	}
 	clientConfig, err := clientcmd.NewClientConfigFromBytes([]byte(to.String(c.spec.MgmtClusterKubeConfig)))
 	if err != nil {
-		return err
+		fmt.Printf("%#v\n", c.spec.MgmtClusterKubeConfig)
+		return errors.Errorf("Unable to create k8s client from file: %s\n", err)
 	}
 	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
-		return err
+		return errors.Errorf("Unable to create k8s rest client from file: %s\n", err)
 	}
 	config, err := clientConfig.RawConfig()
 	if err != nil {
-		return err
+		return errors.Errorf("Unable to create raw kubeconfig from k8s client: %s\n", err)
 	}
 	c.mgmtClusterURL = restConfig.Host
 	c.mgmtClusterName = config.CurrentContext
 	c.createStatus.mgmtClusterClient, err = kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return err
+		return errors.Errorf("Unable to create k8s client for mgmt cluster: %s\n", err)
 	}
 	err = c.IsMgmtClusterReady(5*time.Second, 20*time.Minute)
 	if err != nil {
-		log.Printf("management cluster %s not ready in 20 mins: %s\n", c.mgmtClusterName, err)
-		return err
+		return errors.Errorf("management cluster %s not ready in 20 mins: %s\n", err)
 	}
 	azureJSON := AzureJSON{
 		Cloud:                        to.String(c.spec.AzureEnvironment),
@@ -202,7 +196,7 @@ func (c *cluster) Create() error {
 	}
 	b, err := json.MarshalIndent(azureJSON, "", "    ")
 	if err != nil {
-		log.Printf("Unable to generate azure.JSON config: %s\n", err)
+		return errors.Errorf("Unable to generate azure.JSON config: %s\n", err)
 	}
 
 	clusterCtlConfig := clusterCtlConfigMap{
@@ -228,7 +222,7 @@ func (c *cluster) Create() error {
 	for k, v := range clusterCtlConfig {
 		err := os.Setenv(k, v)
 		if err != nil {
-			return errors.Wrap(err, fmt.Sprintf("setting %s env var", k))
+			return errors.Errorf("Failed to set env var %s=%s: %s\n", k, v, err)
 		}
 	}
 
@@ -254,9 +248,7 @@ func (c *cluster) Create() error {
 		fmt.Printf("%s\n", fmt.Sprintf("$ %s", strings.Join(cmd.Args, " ")))
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
-			log.Printf("%\n", string(out))
-			log.Printf("Unable to initialize management cluster %s for Azure: %s\n", c.mgmtClusterName, err)
-			return err
+			return errors.Errorf("Unable to initialize management cluster %s for Azure: %s\n", c.mgmtClusterName, err)
 		}
 	}
 	c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
@@ -264,41 +256,37 @@ func (c *cluster) Create() error {
 	c.createStatus.clusterConfigYaml, err = cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("%\n", string(c.createStatus.clusterConfigYaml))
-		log.Printf("Unable to generate cluster config: %s\n", err)
-		return err
+		return errors.Errorf("Unable to generate cluster config: %s\n", err)
 	}
-	time.Sleep(10 * time.Second)
+	time.Sleep(2 * time.Minute)
 	err = c.ApplyClusterAPIConfig(3*time.Second, 5*time.Minute)
 	if err != nil {
-		log.Printf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.mgmtClusterName, err)
-		return err
+		return errors.Errorf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.mgmtClusterName, err)
 	}
 	secret, err := c.GetKubeConfig(30*time.Second, 20*time.Minute)
 	if err != nil {
-		log.Printf("Unable to get cluster %s kubeconfig from cluster-api management cluster %s: %s\n", yellowbold(to.String(c.spec.ClusterName)), yellowbold(c.mgmtClusterName), err)
-		return err
+		return errors.Errorf("Unable to get cluster %s kubeconfig from cluster-api management cluster %s: %s\n", c.spec.ClusterName, c.mgmtClusterName, err)
 	}
 	c.createStatus.kubeConfig, err = base64.StdEncoding.DecodeString(secret)
 	if err != nil {
-		log.Printf("Unable to decode cluster %s kubeconfig: %s\n", to.String(c.spec.ClusterName), err)
+		return errors.Errorf("Unable to decode cluster %s kubeconfig: %s\n", c.spec.ClusterName, err)
 	}
 	clientConfigNewCluster, err := clientcmd.NewClientConfigFromBytes(c.createStatus.kubeConfig)
 	if err != nil {
-		return err
+		return errors.Errorf("Unable to client config: %s\n", err)
 	}
 	restConfigNewCluster, err := clientConfigNewCluster.ClientConfig()
 	if err != nil {
-		return err
+		return errors.Errorf("Unable to create rest config from k8s client: %s\n", err)
 	}
 	c.client, err = kubernetes.NewForConfig(restConfigNewCluster)
 	if err != nil {
-		return err
+		return errors.Errorf("Unable to create k8s client from rest config: %s\n", err)
 	}
 	c.createStatus.kubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, to.String(c.spec.ClusterName))
 	f2, err := os.Create(c.createStatus.kubeConfigPath)
 	if err != nil {
-		log.Printf("Unable to create and open kubeconfig file for writing: %s\n", err)
-		return err
+		return errors.Errorf("Unable to create and open kubeconfig file for writing: %s\n", err)
 	}
 	defer func() {
 		if err := f2.Close(); err != nil {
@@ -310,15 +298,13 @@ func (c *cluster) Create() error {
 	}
 	err = c.IsReady(30*time.Second, 20*time.Minute)
 	if err != nil {
-		log.Printf("Cluster %s not ready in 20 mins: %s\n", to.String(c.spec.ClusterName), err)
-		return err
+		return errors.Errorf("Cluster %s not ready in 20 mins: %s\n", c.spec.ClusterName, err)
 	}
 	cmd = exec.Command("kubectl", "apply", "-f", CalicoSpec, "--kubeconfig", c.createStatus.kubeConfigPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("%\n", string(out))
-		log.Printf("Unable to apply cluster config to cluster-api management cluster: %s\n", err)
-		return err
+		return errors.Errorf("Unable to apply cluster config to cluster-api management cluster: %s\n", err)
 	}
 
 	if to.Bool(c.createStatus.needsPivot) {
@@ -330,8 +316,7 @@ func (c *cluster) Create() error {
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
-			log.Printf("Unable to install cluster-api components on cluster %s: %s\n", to.String(c.spec.ClusterName), err)
-			return err
+			return errors.Errorf("Unable to install cluster-api components on cluster %s: %s\n", c.spec.ClusterName, err)
 		}
 		c.createStatus.localClusterAPIReady = to.BoolPtr(true)
 		time.Sleep(1 * time.Minute)
@@ -340,19 +325,16 @@ func (c *cluster) Create() error {
 		out, err = cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
-			log.Printf("Unable to move cluster-api objects from cluster %s to cluster %s: %s\n", c.mgmtClusterName, to.String(c.spec.ClusterName), err)
-			return err
+			return errors.Errorf("Unable to move cluster-api objects from cluster %s to cluster %s: %s\n", c.mgmtClusterName, c.spec.ClusterName, err)
 		}
 		c.createStatus.pivotComplete = to.BoolPtr(true)
 		err = deleteAKSMgmtClusterWithRetry(c.mgmtClusterName, 30*time.Second, 10*time.Minute)
 		if err != nil {
-			log.Printf("Unable to delete AKS management cluster: %s\n", err)
-			return err
+			return errors.Errorf("Unable to delete AKS management cluster: %s\n", err)
 		}
 		err = deleteAKSMgmtClusterResourceGroupWithRetry(c.mgmtClusterName, 30*time.Second, 3*time.Minute)
 		if err != nil {
-			log.Printf("Unable to delete AKS management cluster resource group: %s\n", err)
-			return err
+			return errors.Errorf("Unable to delete AKS management cluster resource group: %s\n", err)
 		}
 		c.createStatus.cleanupComplete = to.BoolPtr(true)
 	}

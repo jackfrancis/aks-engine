@@ -4,7 +4,9 @@ package restapi
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/Azure/aks-engine/pkg/swagger/models"
 	"github.com/Azure/aks-engine/pkg/v2/engine"
@@ -83,11 +85,12 @@ func configureAPI(api *operations.AksengineAPI) http.Handler {
 
 		cluster := engine.NewCluster(clusterSpec)
 		err := cluster.Create()
-		if err != nil {
+		if err == nil {
 			return operations.NewCreateClusterOK().WithPayload(&models.CreateData{
-				ClusterName: to.StringPtr(to.String(clusterSpec.ClusterName)),
+				ClusterName: to.StringPtr(cluster.GetName()),
 			})
 		}
+		fmt.Printf("%#v\n", err)
 		return operations.NewCreateClusterDefault(http.StatusInternalServerError)
 	})
 	if api.HealthzHandler == nil {
@@ -113,6 +116,8 @@ func configureTLS(tlsConfig *tls.Config) {
 // This function can be called multiple times, depending on the number of serving schemes.
 // scheme value will be set accordingly: "http", "https" or "unix"
 func configureServer(s *http.Server, scheme, addr string) {
+	//Keep conection alive for long long time
+	s.WriteTimeout = 1 * time.Hour
 }
 
 // The middleware configuration is for the handler executors. These do not apply to the swagger.json document.
