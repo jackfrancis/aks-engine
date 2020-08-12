@@ -68,6 +68,8 @@ type Cluster interface {
 	IsMgmtClusterAPIReady() *bool
 	MgmtClusterNeedsClusterAPIInit() *bool
 	NeedsPivot() *bool
+	IsPivotComplete() *bool
+	IsCleanupComplete() *bool
 	GetName() string
 	GetMgmtClusterName() string
 	GetMgmtClusterURL() string
@@ -121,8 +123,10 @@ func (c *cluster) Create() error {
 		return errors.Errorf("Unable to get home dir: %s\n", err)
 	}
 	if to.String(c.spec.MgmtClusterKubeConfig) == "" {
+		c.mgmtClusterName = fmt.Sprintf("capz-mgmt-%s", strconv.Itoa(int(time.Now().Unix())))
+		c.createStatus.mgmtClusterIsProvisioning = to.BoolPtr(true)
+		c.createStatus.mgmtClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, c.mgmtClusterName)
 		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(true)
-		c.mgmtClusterName = fmt.Sprintf("capi-mgmt-%s", strconv.Itoa(int(time.Now().Unix())))
 		c.createStatus.needsPivot = to.BoolPtr(true)
 		err = createAKSMgmtClusterResourceGroupWithRetry(c.mgmtClusterName, to.String(c.spec.Location), 30*time.Second, 3*time.Minute)
 		if err != nil {
@@ -132,8 +136,6 @@ func (c *cluster) Create() error {
 		if err != nil {
 			return errors.Errorf("Unable to create AKS management cluster: %s\n", err)
 		}
-		c.createStatus.mgmtClusterIsProvisioning = to.BoolPtr(true)
-		c.createStatus.mgmtClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, c.mgmtClusterName)
 		err = getAKSMgmtClusterCredsWithRetry(c.mgmtClusterName, c.createStatus.mgmtClusterKubeConfigPath, 5*time.Second, 10*time.Minute)
 		if err != nil {
 			log.Printf("Unable to get AKS management cluster kubeconfig: %s\n", err)
@@ -252,7 +254,9 @@ func (c *cluster) Create() error {
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			return errors.Errorf("Unable to initialize management cluster %s for Azure: %s\n", c.mgmtClusterName, err)
 		}
-		time.Sleep(2 * time.Minute)
+		// TODO remove this extraneous assignment when we're able to remove the delay
+		c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
+		time.Sleep(1 * time.Minute)
 	}
 	c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
 	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", to.String(c.spec.ClusterName), "--kubernetes-version", fmt.Sprintf("v%s", to.String(c.spec.KubernetesVersion)), "--control-plane-machine-count", strconv.Itoa(int(c.spec.ControlPlaneNodes)), "--worker-machine-count", strconv.Itoa(int(c.spec.Nodes)))
@@ -517,6 +521,14 @@ func (c *cluster) NeedsPivot() *bool {
 	return c.createStatus.needsPivot
 }
 
+func (c *cluster) IsPivotComplete() *bool {
+	return c.createStatus.pivotComplete
+}
+
+func (c *cluster) IsCleanupComplete() *bool {
+	return c.createStatus.cleanupComplete
+}
+
 func namespaceExists(kubeconfigPath, namespace string) isExecNonZeroExitResult {
 	cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", kubeconfigPath), "get", "namespace", namespace)
 	out, err := cmd.CombinedOutput()
@@ -589,7 +601,6 @@ func namespaceExistsWithRetry(kubeconfigPath, namespace string, sleep, timeout t
 	defer cancel()
 	ch := make(chan isExecNonZeroExitResult)
 	var mostRecentNamespaceExistsWithRetryError error
-	var stdout []byte
 	go func() {
 		for {
 			select {
@@ -605,12 +616,10 @@ func namespaceExistsWithRetry(kubeconfigPath, namespace string, sleep, timeout t
 		select {
 		case result := <-ch:
 			mostRecentNamespaceExistsWithRetryError = result.err
-			stdout = result.stdout
 			if mostRecentNamespaceExistsWithRetryError == nil {
 				return nil
 			}
 		case <-ctx.Done():
-			fmt.Printf("%s\n", string(stdout))
 			return errors.Errorf("namespaceExistsWithRetry timed out: %s\n", mostRecentNamespaceExistsWithRetryError)
 		}
 	}

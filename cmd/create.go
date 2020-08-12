@@ -146,7 +146,7 @@ func validateMgmtClusterReadyForClusterAPI(c engine.Cluster) bool {
 }
 
 func validateMgmtClusterIsProvisioning(c engine.Cluster) bool {
-	return to.Bool(c.IsMgmtClusterProvisioning())
+	return c.GetMgmtClusterName() != "" && to.Bool(c.IsMgmtClusterProvisioning())
 }
 
 func validateIsProvisioning(c engine.Cluster) bool {
@@ -155,10 +155,18 @@ func validateIsProvisioning(c engine.Cluster) bool {
 
 func validateIsPivoting(c engine.Cluster) bool {
 	if to.Bool(c.NeedsPivot()) && to.Bool(c.IsProvisioning()) {
-		err := c.IsReady(30*time.Second, 20*time.Minute)
+		err := c.IsReady(3*time.Second, 1*time.Second)
 		return err == nil
 	}
 	return false
+}
+
+func validatePivotComplete(c engine.Cluster) bool {
+	return to.Bool(c.IsPivotComplete())
+}
+
+func validateCleanupComplete(c engine.Cluster) bool {
+	return to.Bool(c.IsCleanupComplete())
 }
 
 func validateReady(ctx context.Context, c engine.Cluster, ready phaseReady) bool {
@@ -248,7 +256,6 @@ func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{
 }
 
 func (cc *CreateCmd) Run() error {
-	fmt.Printf("\n")
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return errors.Errorf("Unable to get home dir: %s\n", err)
@@ -287,7 +294,6 @@ func (cc *CreateCmd) Run() error {
 	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
 	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
 	s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
-	s.Color("yellow")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	clusterCreateDoneChannel := make(chan error)
@@ -299,6 +305,8 @@ func (cc *CreateCmd) Run() error {
 	mgmtClusterAPIInstalled := make(chan struct{})
 	clusterConfigGenerated := make(chan struct{})
 	clusterProvisioning := make(chan struct{})
+	pivotComplete := make(chan struct{})
+	cleanupComplete := make(chan struct{})
 	go func() {
 		for {
 			select {
@@ -313,7 +321,7 @@ func (cc *CreateCmd) Run() error {
 		}
 	}()
 	var mgmtClusterProvisionInfoMessage phaseMessage = func(c engine.Cluster) {
-		fmt.Printf("No management cluster provided: a temporary Kubernetes cluster will be created to enable a cluster-api-powered installation %s....\n", bold("☕"))
+		fmt.Printf("No management cluster provided: a temporary AKS Kubernetes cluster %s will be created to enable a cluster-api-powered installation %s....\n", magentabold(cluster.GetMgmtClusterName()), bold("☕"))
 		if !s.Active() {
 			s.Start()
 		}
@@ -326,6 +334,9 @@ func (cc *CreateCmd) Run() error {
 	}
 	var waitForMgmtClusterAPIReadyMessage phaseMessage = func(c engine.Cluster) {
 		fmt.Printf("Checking if management cluster %s is cluster-api-ready....", magentabold(cluster.GetMgmtClusterName()))
+	}
+	var installingClusterAPIOnMgmtClusterMessage phaseMessage = func(c engine.Cluster) {
+		fmt.Printf("Installing cluster-api components on management cluster %s.... ", magentabold(cluster.GetMgmtClusterName()))
 	}
 	var clusterConfigGeneratedInfoMessage phaseMessage = func(c engine.Cluster) {
 		fmt.Printf("Cluster config generated for new cluster %s and saved to %s.", yellowbold(cluster.GetName()), bold(fmt.Sprintf("%s/%s.yaml", cwd, cluster.GetName())))
@@ -348,19 +359,23 @@ func (cc *CreateCmd) Run() error {
 			s.Start()
 		}
 	}
+	var cleaningUpInfoMessage phaseMessage = func(c engine.Cluster) {
+		fmt.Printf("Cleaning up temporary AKS Kubernetes cluster...")
+	}
 	if cc.MgmtClusterKubeConfigPath == "" {
-		waitForCondition(ctx, cluster, mgmtClusterProvisioning, validateMgmtClusterIsProvisioning, mgmtClusterProvisionInfoMessage, nil)
+		waitForCondition(ctx, cluster, mgmtClusterProvisioning, validateMgmtClusterIsProvisioning, nil, mgmtClusterProvisionInfoMessage)
 	}
 	waitForCondition(ctx, cluster, mgmtClusterConfigValidated, validateMgmtClusterConfig, nil, nil)
 	validatePhaseProgress(ctx, cluster, mgmtClusterConfigValidated, mgmtClusterReady, validateMgmtClusterReady, reconcile, nil, waitForMgmtClusterReadyMessage, nil)
 	validatePhaseProgress(ctx, cluster, mgmtClusterReady, mgmtClusterEvaluatedForClusterAPIReadiness, validateMgmtClusterForClusterAPIReadiness, reconcile, nil, waitForMgmtClusterAPIReadyMessage, nil)
 	validatePhaseProgress(ctx, cluster, mgmtClusterEvaluatedForClusterAPIReadiness, mgmtClusterNeedsClusterAPI, validateMgmtClusterNeedsClusterAPIComponents, validateOnce, nil, nil, nil)
-	validatePhaseProgress(ctx, cluster, mgmtClusterNeedsClusterAPI, mgmtClusterAPIInstalled, validateMgmtClusterReadyForClusterAPI, reconcile, nil, nil, nil)
+	validatePhaseProgress(ctx, cluster, mgmtClusterNeedsClusterAPI, mgmtClusterAPIInstalled, validateMgmtClusterReadyForClusterAPI, reconcile, nil, installingClusterAPIOnMgmtClusterMessage, nil)
 	waitForCondition(ctx, cluster, clusterConfigGenerated, validateClusterConfig, nil, clusterConfigGeneratedInfoMessage)
 	validatePhaseProgress(ctx, cluster, clusterConfigGenerated, nil, nil, reconcile, nil, clusterProvisioningMessage, nil)
-	validatePhaseProgress(ctx, cluster, clusterConfigGenerated, nil, nil, reconcile, nil, clusterProvisioningMessage, nil)
-	waitForCondition(ctx, cluster, nil, validateIsPivoting, nil, clusterPivotingInfoMessage)
 	waitForCondition(ctx, cluster, clusterProvisioning, validateIsProvisioning, nil, clusterProvisioningInfoMessage)
+	waitForCondition(ctx, cluster, nil, validateIsPivoting, nil, clusterPivotingInfoMessage)
+	waitForCondition(ctx, cluster, pivotComplete, validatePivotComplete, nil, nil)
+	validatePhaseProgress(ctx, cluster, pivotComplete, cleanupComplete, validateCleanupComplete, reconcile, nil, cleaningUpInfoMessage, nil)
 	for {
 		select {
 		case err := <-clusterCreateDoneChannel:
