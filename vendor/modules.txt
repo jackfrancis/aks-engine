@@ -495,7 +495,13 @@ k8s.io/client-go/util/keyutil
 k8s.io/client-go/util/retry
 # k8s.io/klog v1.0.0
 k8s.io/klog
+<<<<<<< HEAD
 # k8s.io/utils v0.0.0-20190801114015-581e00157fb1
 k8s.io/utils/integer
+=======
+# k8s.io/klog/v2 v2.3.0
+## explicit
+k8s.io/klog/v2
+>>>>>>> logs
 # sigs.k8s.io/yaml v1.1.0
 sigs.k8s.io/yaml

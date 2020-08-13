@@ -83,7 +83,7 @@ func configureAPI(api *operations.AksengineAPI) http.Handler {
 			clusterSpec.Nodes = int64(engine.DefaultNodes)
 		}
 
-		cluster := engine.NewCluster(clusterSpec)
+		cluster := engine.NewCluster(clusterSpec, "")
 		err := cluster.Create()
 		if err == nil {
 			return operations.NewCreateClusterOK().WithPayload(&models.CreateData{

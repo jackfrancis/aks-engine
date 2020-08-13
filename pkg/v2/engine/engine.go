@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -22,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	klog "k8s.io/klog/v2"
 )
 
 const (
@@ -99,23 +101,37 @@ type cluster struct {
 	mgmtClusterName string
 	mgmtClusterURL  string
 	client          *kubernetes.Clientset
+	logfile         string
 }
 
-func NewCluster(spec models.CreateData) Cluster {
+func NewCluster(spec models.CreateData, logfile string) Cluster {
 	return &cluster{
-		spec: spec,
+		logfile: logfile,
+		spec:    spec,
 	}
 }
 
 func (c *cluster) Create() error {
+	if c.logfile != "" {
+		klog.LogToStderr(false)
+		flag.Set("log_file", c.logfile)
+		flag.Parse()
+	} else {
+		klog.LogToStderr(true)
+		flag.Parse()
+	}
+	defer klog.Flush()
 	if to.String(c.spec.ClusterName) == "" {
 		c.spec.ClusterName = to.StringPtr(fmt.Sprintf("k8s-%s", strconv.Itoa(int(time.Now().Unix()))))
 	}
+	klog.Infof("Creating cluster %s...", c.GetName())
 	if to.String(c.spec.VnetName) == "" {
-		c.spec.VnetName = to.StringPtr(to.String(c.spec.ClusterName))
+		klog.Infof("Using cluster name %s for VNET name", c.GetName())
+		c.spec.VnetName = to.StringPtr(c.GetName())
 	}
 	if to.String(c.spec.ResourceGroup) == "" {
-		c.spec.ResourceGroup = to.StringPtr(to.String(c.spec.ClusterName))
+		klog.Infof("Using cluster name %s for resource group name", c.GetName())
+		c.spec.ResourceGroup = to.StringPtr(c.GetName())
 	}
 
 	h, err := os.UserHomeDir()
@@ -123,24 +139,32 @@ func (c *cluster) Create() error {
 		return errors.Errorf("Unable to get home dir: %s\n", err)
 	}
 	if to.String(c.spec.MgmtClusterKubeConfig) == "" {
+		klog.Infof("Management kubeconfig not provided, will create an ephemeral one")
 		c.mgmtClusterName = fmt.Sprintf("capz-mgmt-%s", strconv.Itoa(int(time.Now().Unix())))
+		klog.Infof("Will create an ephemeral AKS cluster %s in resource group %s", c.GetMgmtClusterName(), c.GetMgmtClusterName())
 		c.createStatus.mgmtClusterIsProvisioning = to.BoolPtr(true)
-		c.createStatus.mgmtClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, c.mgmtClusterName)
+		c.createStatus.mgmtClusterKubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, c.GetMgmtClusterName())
 		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(true)
 		c.createStatus.needsPivot = to.BoolPtr(true)
-		err = createAKSMgmtClusterResourceGroupWithRetry(c.mgmtClusterName, to.String(c.spec.Location), 30*time.Second, 3*time.Minute)
+		klog.Infof("Creating resource group %s for ephemeral AKS cluster...", c.GetMgmtClusterName())
+		err = createAKSMgmtClusterResourceGroupWithRetry(c.GetMgmtClusterName(), to.String(c.spec.Location), 30*time.Second, 3*time.Minute)
 		if err != nil {
 			return errors.Errorf("Unable to create AKS management cluster resource group: %s\n", err)
 		}
-		err = createAKSMgmtClusterWithRetry(c.mgmtClusterName, 30*time.Second, 10*time.Minute)
+		klog.Infof("Resource group %s created", c.GetMgmtClusterName())
+		klog.Infof("Creating AKS cluster %s...", c.GetMgmtClusterName())
+		err = createAKSMgmtClusterWithRetry(c.GetMgmtClusterName(), 30*time.Second, 10*time.Minute)
 		if err != nil {
 			return errors.Errorf("Unable to create AKS management cluster: %s\n", err)
 		}
-		err = getAKSMgmtClusterCredsWithRetry(c.mgmtClusterName, c.createStatus.mgmtClusterKubeConfigPath, 5*time.Second, 10*time.Minute)
+		klog.Infof("AKS cluster %s created", c.GetMgmtClusterName())
+		klog.Infof("Retrieving kubeconfig for AKS cluster %s...", c.GetMgmtClusterName())
+		err = getAKSMgmtClusterCredsWithRetry(c.GetMgmtClusterName(), c.createStatus.mgmtClusterKubeConfigPath, 5*time.Second, 10*time.Minute)
 		if err != nil {
 			log.Printf("Unable to get AKS management cluster kubeconfig: %s\n", err)
 			return err
 		}
+		klog.Infof("Got kubeconfig for AKS cluster %s and wrote to %s", c.GetMgmtClusterName(), c.createStatus.mgmtClusterKubeConfigPath)
 		b, err := ioutil.ReadFile(c.createStatus.mgmtClusterKubeConfigPath)
 		if err != nil {
 			return errors.Errorf("Unable to open mgmt cluster kubeconfig file for reading: %s\n", err)
@@ -172,14 +196,17 @@ func (c *cluster) Create() error {
 	}
 	c.mgmtClusterURL = restConfig.Host
 	c.mgmtClusterName = config.CurrentContext
+	klog.Infof("Will use management cluster %s at URL %s", c.GetMgmtClusterName(), c.GetMgmtClusterURL())
 	c.createStatus.mgmtClusterClient, err = kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return errors.Errorf("Unable to create k8s client for mgmt cluster: %s\n", err)
 	}
+	klog.Infof("Checking that management cluster %s is ready and operational...", c.GetMgmtClusterName())
 	err = c.IsMgmtClusterReady(5*time.Second, 20*time.Minute)
 	if err != nil {
 		return errors.Errorf("management cluster %s not ready in 20 mins: %s\n", err)
 	}
+	klog.Infof("Management cluster %s is online!", c.GetMgmtClusterName())
 	azureJSON := AzureJSON{
 		Cloud:                        to.String(c.spec.AzureEnvironment),
 		TenantID:                     to.String(c.spec.TenantID),
@@ -187,13 +214,13 @@ func (c *cluster) Create() error {
 		AADClientID:                  to.String(c.spec.ClientID),
 		AADClientSecret:              to.String(c.spec.ClientSecret),
 		ResourceGroup:                to.String(c.spec.ResourceGroup),
-		SecurityGroupName:            fmt.Sprintf("%s-node-nsg", to.String(c.spec.ClusterName)),
+		SecurityGroupName:            fmt.Sprintf("%s-node-nsg", c.GetName()),
 		Location:                     to.String(c.spec.Location),
 		VMType:                       "vmss",
 		VNETName:                     to.String(c.spec.VnetName),
 		VNETResourceGroup:            to.String(c.spec.ResourceGroup),
-		SubnetName:                   fmt.Sprintf("%s-node-subnet", to.String(c.spec.ClusterName)),
-		RouteTableName:               fmt.Sprintf("%s-node-routetable", to.String(c.spec.ClusterName)),
+		SubnetName:                   fmt.Sprintf("%s-node-subnet", c.GetName()),
+		RouteTableName:               fmt.Sprintf("%s-node-routetable", c.GetName()),
 		LoadBalancerSku:              "standard",
 		MaximumLoadBalancerRuleCount: 250,
 		UseManagedIdentityExtension:  false,
@@ -215,7 +242,7 @@ func (c *cluster) Create() error {
 		"AZURE_CLIENT_SECRET_B64":          base64.StdEncoding.EncodeToString([]byte(to.String(c.spec.ClientSecret))),
 		"AZURE_ENVIRONMENT":                to.String(c.spec.AzureEnvironment),
 		"KUBECONFIG":                       c.createStatus.mgmtClusterKubeConfigPath,
-		"CLUSTER_NAME":                     to.String(c.spec.ClusterName),
+		"CLUSTER_NAME":                     c.GetName(),
 		"AZURE_VNET_NAME":                  to.String(c.spec.VnetName),
 		"AZURE_RESOURCE_GROUP":             to.String(c.spec.ResourceGroup),
 		"AZURE_LOCATION":                   to.String(c.spec.Location),
@@ -232,6 +259,7 @@ func (c *cluster) Create() error {
 	}
 
 	if !to.Bool(c.createStatus.mgmtClusterNeedsClusterAPIInit) {
+		klog.Infof("Verifying if management cluster %s has cluster-api + Azure controllers installed...", c.GetMgmtClusterName())
 		for _, namespace := range []string{
 			"capi-system",
 			"capi-webhook-system",
@@ -246,36 +274,44 @@ func (c *cluster) Create() error {
 		}
 	}
 	if c.createStatus.mgmtClusterNeedsClusterAPIInit == nil {
+		klog.Infof("Management cluster %s does not have cluster-api + Azure controllers installed already", c.GetMgmtClusterName())
 		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(false)
 	}
 	if to.Bool(c.createStatus.mgmtClusterNeedsClusterAPIInit) {
+		klog.Infof("Installing cluster-api + Azure controllers on mgmt cluster %s...", c.GetMgmtClusterName())
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.mgmtClusterKubeConfigPath, "--infrastructure", "azure")
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
-			return errors.Errorf("Unable to initialize management cluster %s for Azure: %s\n", c.mgmtClusterName, err)
+			return errors.Errorf("Unable to initialize management cluster %s for Azure: %s\n", c.GetMgmtClusterName(), err)
 		}
+		klog.Infof("cluster-api + Azure controllers installed on mgmt cluster %s", c.GetMgmtClusterName())
 		// TODO remove this extraneous assignment when we're able to remove the delay
 		c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
 		time.Sleep(1 * time.Minute)
 	}
 	c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
-	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", to.String(c.spec.ClusterName), "--kubernetes-version", fmt.Sprintf("v%s", to.String(c.spec.KubernetesVersion)), "--control-plane-machine-count", strconv.Itoa(int(c.spec.ControlPlaneNodes)), "--worker-machine-count", strconv.Itoa(int(c.spec.Nodes)))
+	klog.Infof("Generating Azure cluster-api spec for cluster %s...", c.GetName())
+	cmd := exec.Command("clusterctl", "config", "cluster", "--infrastructure", "azure", c.GetName(), "--kubernetes-version", fmt.Sprintf("v%s", to.String(c.spec.KubernetesVersion)), "--control-plane-machine-count", strconv.Itoa(int(c.spec.ControlPlaneNodes)), "--worker-machine-count", strconv.Itoa(int(c.spec.Nodes)))
 	c.createStatus.clusterConfigYaml, err = cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("%\n", string(c.createStatus.clusterConfigYaml))
 		return errors.Errorf("Unable to generate cluster config: %s\n", err)
 	}
+	klog.Infof("Sending Azure cluster-api spec to management cluster %s, it will create new cluster %s...", c.GetMgmtClusterName(), c.GetName())
 	err = c.ApplyClusterAPIConfig(3*time.Second, 5*time.Minute)
 	if err != nil {
-		return errors.Errorf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.mgmtClusterName, err)
+		return errors.Errorf("Unable to apply cluster config to cluster-api management cluster %s: %s\n", c.GetMgmtClusterName(), err)
 	}
+	klog.Infof("Management cluster %s is provisioning new cluster %s!", c.GetMgmtClusterName(), c.GetName())
+	klog.Infof("Waiting for management cluster %s to generate kubeconfig for new cluster %s...", c.GetMgmtClusterName(), c.GetName())
 	secret, err := c.GetKubeConfig(30*time.Second, 20*time.Minute)
 	if err != nil {
-		return errors.Errorf("Unable to get cluster %s kubeconfig from cluster-api management cluster %s: %s\n", c.spec.ClusterName, c.mgmtClusterName, err)
+		return errors.Errorf("Unable to get cluster %s kubeconfig from cluster-api management cluster %s: %s\n", c.GetName(), c.GetMgmtClusterName(), err)
 	}
+	klog.Infof("Got kubeconfig for new cluster %s", c.GetName())
 	c.createStatus.kubeConfig, err = base64.StdEncoding.DecodeString(secret)
 	if err != nil {
-		return errors.Errorf("Unable to decode cluster %s kubeconfig: %s\n", c.spec.ClusterName, err)
+		return errors.Errorf("Unable to decode cluster %s kubeconfig: %s\n", c.GetName(), err)
 	}
 	clientConfigNewCluster, err := clientcmd.NewClientConfigFromBytes(c.createStatus.kubeConfig)
 	if err != nil {
@@ -289,7 +325,7 @@ func (c *cluster) Create() error {
 	if err != nil {
 		return errors.Errorf("Unable to create k8s client from rest config: %s\n", err)
 	}
-	c.createStatus.kubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, to.String(c.spec.ClusterName))
+	c.createStatus.kubeConfigPath = fmt.Sprintf("%s/.kube/%s.kubeconfig", h, c.GetName())
 	f2, err := os.Create(c.createStatus.kubeConfigPath)
 	if err != nil {
 		return errors.Errorf("Unable to create and open kubeconfig file for writing: %s\n", err)
@@ -302,10 +338,13 @@ func (c *cluster) Create() error {
 	if _, err := f2.Write(c.createStatus.kubeConfig); err != nil {
 		panic(err)
 	}
+	klog.Infof("Waiting for new cluster %s to come online...", c.GetName())
 	err = c.IsReady(30*time.Second, 20*time.Minute)
 	if err != nil {
-		return errors.Errorf("Cluster %s not ready in 20 mins: %s\n", c.spec.ClusterName, err)
+		return errors.Errorf("Cluster %s not ready in 20 mins: %s\n", c.GetName(), err)
 	}
+	klog.Infof("Cluster %s is online!", c.GetName())
+	klog.Infof("Applying calico CNI spec to cluster %s...", c.GetName())
 	cmd = exec.Command("kubectl", "apply", "-f", CalicoSpec, "--kubeconfig", c.createStatus.kubeConfigPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -314,34 +353,42 @@ func (c *cluster) Create() error {
 	}
 
 	if to.Bool(c.createStatus.needsPivot) {
+		klog.Infof("Will install cluster-api interfaces and cluster state to new cluster %s", c.GetName())
+		klog.Infof("Waiting for at least one worker node to become Ready in cluster %s...", c.GetName())
 		if err := waitForMachineDeploymentReplicas(1, c.createStatus.mgmtClusterKubeConfigPath, 10*time.Second, 20*time.Minute); err != nil {
 			return err
 		}
+		klog.Infof("Installing cluster-api controllers onto new cluster %s...", c.GetName())
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.kubeConfigPath, "--infrastructure", "azure")
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
-			return errors.Errorf("Unable to install cluster-api components on cluster %s: %s\n", c.spec.ClusterName, err)
+			return errors.Errorf("Unable to install cluster-api components on cluster %s: %s\n", c.GetName(), err)
 		}
+		klog.Infof("cluster-api interfaces are online at cluster %s", c.GetName())
 		c.createStatus.localClusterAPIReady = to.BoolPtr(true)
 		time.Sleep(1 * time.Minute)
+		klog.Infof("Moving cluster state from ephemeral mgmt cluster %s to new cluster %s...", c.GetMgmtClusterName(), c.GetName())
 		cmd = exec.Command("clusterctl", "move", "--kubeconfig", c.createStatus.mgmtClusterKubeConfigPath, "--to-kubeconfig", c.createStatus.kubeConfigPath)
 		out, err = cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
 			log.Printf("%\n", string(out))
-			return errors.Errorf("Unable to move cluster-api objects from cluster %s to cluster %s: %s\n", c.mgmtClusterName, c.spec.ClusterName, err)
+			return errors.Errorf("Unable to move cluster-api objects from cluster %s to cluster %s: %s\n", c.GetMgmtClusterName(), c.GetName(), err)
 		}
+		klog.Infof("Cluster %s is now cluster-api-enabled and ready for self-management!", c.GetName())
 		c.createStatus.pivotComplete = to.BoolPtr(true)
-		err = deleteAKSMgmtClusterWithRetry(c.mgmtClusterName, 30*time.Second, 10*time.Minute)
+		klog.Infof("Deleting ephemeral management cluster %s...", c.GetMgmtClusterName())
+		err = deleteAKSMgmtClusterWithRetry(c.GetMgmtClusterName(), 30*time.Second, 10*time.Minute)
 		if err != nil {
 			return errors.Errorf("Unable to delete AKS management cluster: %s\n", err)
 		}
-		err = deleteAKSMgmtClusterResourceGroupWithRetry(c.mgmtClusterName, 30*time.Second, 3*time.Minute)
+		err = deleteAKSMgmtClusterResourceGroupWithRetry(c.GetMgmtClusterName(), 30*time.Second, 3*time.Minute)
 		if err != nil {
 			return errors.Errorf("Unable to delete AKS management cluster resource group: %s\n", err)
 		}
 		c.createStatus.cleanupComplete = to.BoolPtr(true)
 	}
+	klog.Infof("Cluster %s create complete!", c.GetName())
 	return nil
 }
 
@@ -373,7 +420,7 @@ func (c *cluster) GetKubeConfig(sleep, timeout time.Duration) (string, error) {
 	ch := make(chan getClusterKubeConfigSecretResult)
 	var mostRecentGetClusterKubeConfigWithRetryError error
 	var secret string
-	cmdArgs := append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", c.createStatus.mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", to.String(c.spec.ClusterName)), "-o", "jsonpath={.data.value}")
+	cmdArgs := append([]string{"kubectl"}, fmt.Sprintf("--kubeconfig=%s", c.createStatus.mgmtClusterKubeConfigPath), "get", fmt.Sprintf("secret/%s-kubeconfig", c.GetName()), "-o", "jsonpath={.data.value}")
 	go func() {
 		for {
 			select {

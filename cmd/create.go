@@ -289,7 +289,7 @@ func (cc *CreateCmd) Run() error {
 		KubernetesVersion:     to.StringPtr(cc.KubernetesVersion),
 		ControlPlaneNodes:     int64(cc.ControlPlaneNodes),
 		Nodes:                 int64(cc.Nodes),
-	})
+	}, "aks-engine.log")
 	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
 	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
 	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
