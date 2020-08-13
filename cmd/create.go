@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/aks-engine/pkg/helpers"
+	"github.com/Azure/aks-engine/pkg/i18n"
 	"github.com/Azure/aks-engine/pkg/swagger/models"
 	"github.com/Azure/aks-engine/pkg/v2/engine"
 	"github.com/Azure/go-autorest/autorest/to"
@@ -105,7 +108,7 @@ func newCreateCmd() *cobra.Command {
 	f.StringVarP(&cc.VnetName, "vnet-name", "", "", "name of vnet the cluster will reside in")
 	f.StringVarP(&cc.ResourceGroup, "resource-group", "g", "", "name of resource group the cluster IaaS will reside in")
 	f.StringVarP(&cc.Location, "location", "l", engine.DefaultLocation, "Azure region cluster IaaS will reside in")
-	f.StringVarP(&cc.ControlPlaneVMType, "control-plan-vm-sku", "", engine.DefaultControlPlaneVMType, "SKU for control plane VMs, default is Standard_D2s_v3")
+	f.StringVarP(&cc.ControlPlaneVMType, "control-plane-vm-sku", "", engine.DefaultControlPlaneVMType, "SKU for control plane VMs, default is Standard_D2s_v3")
 	f.StringVarP(&cc.NodeVMType, "node-vm-sku", "", engine.DefaultNodeVMType, "SKU for node VMs, default is Standard_D2s_v3")
 	f.StringVarP(&cc.SSHPublicKey, "ssh-public-key", "", "", "SSH public key to install for remote access to VMs")
 	f.StringVarP(&cc.KubernetesVersion, "kubernetes-version", "v", engine.DefaultKubernetesVersion, "Kubernetes version to install, default is 1.17.8")
@@ -256,6 +259,9 @@ func waitForCondition(ctx context.Context, c engine.Cluster, output chan struct{
 }
 
 func (cc *CreateCmd) Run() error {
+	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
+	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
+	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return errors.Errorf("Unable to get home dir: %s\n", err)
@@ -264,7 +270,7 @@ func (cc *CreateCmd) Run() error {
 	if err != nil {
 		return errors.Errorf("Unable to get current working dir: %s\n", err)
 	}
-	var mgmtClusterKubeConfig string
+	var mgmtClusterKubeConfig, sshPublicKey string
 	if cc.MgmtClusterKubeConfigPath != "" {
 		b, err := ioutil.ReadFile(cc.MgmtClusterKubeConfigPath)
 		if err != nil {
@@ -272,12 +278,59 @@ func (cc *CreateCmd) Run() error {
 		}
 		mgmtClusterKubeConfig = string(b)
 	}
+	if cc.SSHPublicKey != "" {
+		b, err := ioutil.ReadFile(cc.SSHPublicKey)
+		if err != nil {
+			return errors.Errorf("Unable to open ssh public key file for reading: %s\n", err)
+		}
+		sshPublicKey = base64.StdEncoding.EncodeToString(b)
+	} else {
+		locale, err := i18n.LoadTranslations()
+		if err != nil {
+			return errors.Wrap(err, "Unable to localize for ssh keypair generation")
+		}
+		_, publicKey, err := helpers.CreateSaveSSH("aksengine", "", &i18n.Translator{Locale: locale})
+		if err != nil {
+			return errors.Wrap(err, "Failed to generate SSH Key")
+		}
+		sshPublicKey = base64.StdEncoding.EncodeToString([]byte(publicKey))
+		fmt.Printf("Generated ssh keypair for accessing node VMs, private key written to %s\n", bold("./aksengine_rsa"))
+	}
+	var subscriptionID, tenantID, clientID, clientSecret string
+	if cc.SubscriptionID == "" {
+		if subscriptionID = os.Getenv("AZURE_SUBSCRIPTION_ID"); subscriptionID == "" {
+			return errors.Errorf("Can't determine Azure subscription ID, please use either the --subscription-id option, or set and export the $AZURE_SUBSCRIPTION_ID environment variable")
+		}
+	} else {
+		subscriptionID = cc.SubscriptionID
+	}
+	if cc.TenantID == "" {
+		if tenantID = os.Getenv("AZURE_TENANT_ID"); tenantID == "" {
+			return errors.Errorf("Can't determine Azure tenant ID, please use either the --tenant option, or set and export the $AZURE_TENANT_ID environment variable")
+		}
+	} else {
+		tenantID = cc.TenantID
+	}
+	if cc.ClientID == "" {
+		if clientID = os.Getenv("AZURE_CLIENT_ID"); clientID == "" {
+			return errors.Errorf("Can't determine Azure service principal ID, please use either the --client-id option, or set and export the $AZURE_CLIENT_ID environment variable")
+		}
+	} else {
+		clientID = cc.ClientID
+	}
+	if cc.ClientSecret == "" {
+		if clientSecret = os.Getenv("AZURE_CLIENT_SECRET"); clientSecret == "" {
+			return errors.Errorf("Can't determine Azure service principal password, please use either the --client-secret option, or set and export the $AZURE_CLIENT_SECRET environment variable")
+		}
+	} else {
+		clientSecret = cc.ClientSecret
+	}
 	cluster := engine.NewCluster(models.CreateData{
 		MgmtClusterKubeConfig: to.StringPtr(mgmtClusterKubeConfig),
-		SubscriptionID:        to.StringPtr(cc.SubscriptionID),
-		TenantID:              to.StringPtr(cc.TenantID),
-		ClientID:              to.StringPtr(cc.ClientID),
-		ClientSecret:          to.StringPtr(cc.ClientSecret),
+		SubscriptionID:        to.StringPtr(subscriptionID),
+		TenantID:              to.StringPtr(tenantID),
+		ClientID:              to.StringPtr(clientID),
+		ClientSecret:          to.StringPtr(clientSecret),
 		AzureEnvironment:      to.StringPtr(cc.AzureEnvironment),
 		ClusterName:           to.StringPtr(cc.ClusterName),
 		VnetName:              to.StringPtr(cc.VnetName),
@@ -285,14 +338,11 @@ func (cc *CreateCmd) Run() error {
 		Location:              to.StringPtr(cc.Location),
 		ControlPlaneVMType:    to.StringPtr(cc.ControlPlaneVMType),
 		NodeVMType:            to.StringPtr(cc.NodeVMType),
-		SSHPublicKey:          to.StringPtr(cc.SSHPublicKey),
+		SSHPublicKey:          to.StringPtr(sshPublicKey),
 		KubernetesVersion:     to.StringPtr(cc.KubernetesVersion),
 		ControlPlaneNodes:     int64(cc.ControlPlaneNodes),
 		Nodes:                 int64(cc.Nodes),
 	}, "aks-engine.log")
-	yellowbold := color.New(color.FgYellow, color.Bold).SprintFunc()
-	magentabold := color.New(color.FgMagenta, color.Bold).SprintFunc()
-	bold := color.New(color.FgWhite, color.Bold).SprintFunc()
 	s := spinner.New(spinner.CharSets[4], 100*time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
@@ -386,6 +436,13 @@ func (cc *CreateCmd) Run() error {
 			fmt.Printf("\nYour new cluster %s is ready!\n", yellowbold(cluster.GetName()))
 			fmt.Printf("\nE.g.:\n")
 			cmd := exec.Command("kubectl", fmt.Sprintf("--kubeconfig=%s", fmt.Sprintf("%s/.kube/%s.kubeconfig", homeDir, cluster.GetName())), "get", "nodes", "-o", "wide")
+			fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
+			controlPlaneEndpoint := cluster.GetControlPlaneEndpoint(1*time.Second, 1*time.Minute)
+			sshPrivateKeyPath := "<path to private key>"
+			if cc.SSHPublicKey == "" {
+				sshPrivateKeyPath = "./aksengine_rsa"
+			}
+			cmd = exec.Command("ssh", "-A", "-i", sshPrivateKeyPath, fmt.Sprintf("capi@%s", controlPlaneEndpoint))
 			fmt.Printf("%s\n\n", bold(fmt.Sprintf("$ %s", strings.Join(cmd.Args, " "))))
 			return nil
 		case <-ctx.Done():

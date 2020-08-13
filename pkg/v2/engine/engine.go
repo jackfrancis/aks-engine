@@ -77,6 +77,7 @@ type Cluster interface {
 	GetMgmtClusterURL() string
 	GetClusterConfig() []byte
 	GetClient() *kubernetes.Clientset
+	GetControlPlaneEndpoint(time.Duration, time.Duration) string
 }
 
 type createStatus struct {
@@ -176,7 +177,7 @@ func (c *cluster) Create() error {
 			return errors.Errorf("Unable to create temp kubeconfig: %s\n", err)
 		}
 		c.createStatus.mgmtClusterKubeConfigPath = tmpfile.Name()
-		defer os.Remove(c.createStatus.mgmtClusterKubeConfigPath)
+		//defer os.Remove(c.createStatus.mgmtClusterKubeConfigPath)
 		if _, err := tmpfile.Write([]byte(to.String(c.spec.MgmtClusterKubeConfig))); err != nil {
 			return errors.Errorf("Unable to write temp kubeconfig file: %s\n", err)
 		}
@@ -274,11 +275,11 @@ func (c *cluster) Create() error {
 		}
 	}
 	if c.createStatus.mgmtClusterNeedsClusterAPIInit == nil {
-		klog.Infof("Management cluster %s does not have cluster-api + Azure controllers installed already", c.GetMgmtClusterName())
+		klog.Infof("Management cluster %s already has cluster-api + Azure controllers installed", c.GetMgmtClusterName())
 		c.createStatus.mgmtClusterNeedsClusterAPIInit = to.BoolPtr(false)
 	}
 	if to.Bool(c.createStatus.mgmtClusterNeedsClusterAPIInit) {
-		klog.Infof("Installing cluster-api + Azure controllers on mgmt cluster %s...", c.GetMgmtClusterName())
+		klog.Infof("Management cluster %s does not have cluster-api + Azure controllers, installing now ...", c.GetMgmtClusterName())
 		cmd := exec.Command("clusterctl", "init", "--kubeconfig", c.createStatus.mgmtClusterKubeConfigPath, "--infrastructure", "azure")
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "there is already an instance of the \"infrastructure-azure\" provider installed in the \"capz-system\" namespace") {
@@ -287,7 +288,7 @@ func (c *cluster) Create() error {
 		klog.Infof("cluster-api + Azure controllers installed on mgmt cluster %s", c.GetMgmtClusterName())
 		// TODO remove this extraneous assignment when we're able to remove the delay
 		c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
-		time.Sleep(1 * time.Minute)
+		time.Sleep(90 * time.Second)
 	}
 	c.createStatus.mgmtClusterAPIReady = to.BoolPtr(true)
 	klog.Infof("Generating Azure cluster-api spec for cluster %s...", c.GetName())
@@ -375,6 +376,7 @@ func (c *cluster) Create() error {
 			log.Printf("%\n", string(out))
 			return errors.Errorf("Unable to move cluster-api objects from cluster %s to cluster %s: %s\n", c.GetMgmtClusterName(), c.GetName(), err)
 		}
+		c.createStatus.mgmtClusterKubeConfigPath = c.createStatus.kubeConfigPath
 		klog.Infof("Cluster %s is now cluster-api-enabled and ready for self-management!", c.GetName())
 		c.createStatus.pivotComplete = to.BoolPtr(true)
 		klog.Infof("Deleting ephemeral management cluster %s...", c.GetMgmtClusterName())
@@ -922,6 +924,49 @@ func deleteAKSMgmtClusterWithRetry(name string, sleep, timeout time.Duration) er
 		case <-ctx.Done():
 			fmt.Printf("%s\n", string(stdout))
 			return errors.Errorf("deleteAKSMgmtClusterWithRetry timed out: %s\n", mostRecentDeleteAKSMgmtClusterWithRetryError)
+		}
+	}
+}
+
+func getControlPlaneEndpoint(kubeconfig, azureClusterName string) isExecNonZeroExitResult {
+	commandString := fmt.Sprintf("kubectl --kubeconfig %s get azurecluster %s -o json | jq -r '.spec.controlPlaneEndpoint.host'", kubeconfig, azureClusterName)
+	cmd := exec.Command("bash", "-c", commandString)
+	out, err := cmd.CombinedOutput()
+	return isExecNonZeroExitResult{
+		stdout: out,
+		err:    err,
+	}
+}
+
+// GetControlPlaneEndpoint gets the azurecluster controlPlaneEndpoint value
+func (c *cluster) GetControlPlaneEndpoint(sleep, timeout time.Duration) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	ch := make(chan isExecNonZeroExitResult)
+	var mostRecentGetControlPlaneEndpointError error
+	var stdout []byte
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				ch <- getControlPlaneEndpoint(c.createStatus.mgmtClusterKubeConfigPath, c.GetName())
+				time.Sleep(sleep)
+			}
+		}
+	}()
+	for {
+		select {
+		case result := <-ch:
+			mostRecentGetControlPlaneEndpointError = result.err
+			stdout = result.stdout
+			if len(stdout) > 0 {
+				return strings.TrimSuffix(string(stdout), "\n")
+			}
+		case <-ctx.Done():
+			klog.Errorf("GetControlPlaneEndpoint timed out: %s\n", mostRecentGetControlPlaneEndpointError)
+			return ""
 		}
 	}
 }
