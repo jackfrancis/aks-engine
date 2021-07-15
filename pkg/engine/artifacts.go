@@ -230,6 +230,11 @@ func kubernetesAddonSettingsInit(p *api.Properties) map[string]kubernetesCompone
 			base64Data:      k.GetAddonScript(common.AzureArcOnboardingAddonName),
 			destinationFile: connectedClusterAddonDestinationFilename,
 		},
+		common.KrustletAddonName: {
+			sourceFile:      krustletAddonSourceFileName,
+			base64Data:      k.GetAddonScript(common.KrustletAddonName),
+			destinationFile: krustletAddonDestinationFileName,
+		},
 	}
 }
 

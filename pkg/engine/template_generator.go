@@ -754,6 +754,9 @@ version = 2
 		"GetEtcdStorageLimitGB": func() int {
 			return cs.Properties.OrchestratorProfile.KubernetesConfig.EtcdStorageLimitGB * 1024 * 1024 * 1024
 		},
+		"HasKrustletNodePool": func() bool {
+			return cs.Properties.HasKrustletNodePool()
+		},
 		"GetApplicationInsightsTelemetryKeys": func() string {
 			userSuppliedAIKey := ""
 			if cs.Properties.TelemetryProfile != nil {

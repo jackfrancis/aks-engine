@@ -98,6 +98,7 @@ const (
 	untaintNodesScript                       = "k8s/cloud-init/artifacts/untaint-nodes.sh"
 	untaintNodesSystemdService               = "k8s/cloud-init/artifacts/untaint-nodes.service"
 	kubernetesMasterGenerateProxyCertsScript = "k8s/cloud-init/artifacts/generateproxycerts.sh"
+	generateKrustletKubeconfig               = "k8s/cloud-init/artifacts/krustlet_generate_kubeconfig.sh"
 	kubernetesCustomSearchDomainsScript      = "k8s/cloud-init/artifacts/setup-custom-search-domains.sh"
 	kubeletSystemdService                    = "k8s/cloud-init/artifacts/kubelet.service"
 	aptPreferences                           = "k8s/cloud-init/artifacts/apt-preferences"
@@ -201,6 +202,8 @@ const (
 	secretsStoreCSIDriverAddonDestinationFileName string = "secrets-store-csi-driver.yaml"
 	connectedClusterAddonSourceFilename           string = "arc-onboarding.yaml"
 	connectedClusterAddonDestinationFilename      string = "arc-onboarding.yaml"
+	krustletAddonSourceFileName                   string = "krustlet.yaml"
+	krustletAddonDestinationFileName              string = "krustlet.yaml"
 )
 
 // components source and destination file references

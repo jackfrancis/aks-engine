@@ -979,7 +979,7 @@ func (a *AgentPoolProfile) validateAvailabilityProfile() error {
 }
 
 func (a *AgentPoolProfile) validateRoles() error {
-	validRoles := []AgentPoolProfileRole{AgentPoolProfileRoleEmpty}
+	validRoles := []AgentPoolProfileRole{AgentPoolProfileRoleEmpty, AgentPoolProfileRoleKrustlet}
 	var found bool
 	for _, validRole := range validRoles {
 		if a.Role == validRole {

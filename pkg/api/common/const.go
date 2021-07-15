@@ -231,6 +231,8 @@ const (
 	CSISecretsStoreProviderAzureContainerName = "provider-azure-installer"
 	// ArcAddonName is the name of the arc addon
 	AzureArcOnboardingAddonName = "azure-arc-onboarding"
+	// KrustletAddonName is the name of the krustlet addon
+	KrustletAddonName = "krustlet"
 )
 
 // Component name consts

@@ -91,15 +91,20 @@ func getK8sMasterVars(cs *api.ContainerService) (map[string]interface{}, error) 
 	hasAgentPool := len(profiles) > 0
 	hasCosmosEtcd := masterProfile != nil && masterProfile.HasCosmosEtcd()
 	scriptParamsInput := api.ProvisionScriptParametersInput{
-		Location:             common.WrapAsARMVariable("location"),
-		ResourceGroup:        common.WrapAsARMVariable("resourceGroup"),
-		TenantID:             common.WrapAsARMVariable("tenantID"),
-		SubscriptionID:       common.WrapAsARMVariable("subscriptionId"),
-		ClientID:             common.WrapAsARMVariable("servicePrincipalClientId"),
-		ClientSecret:         common.WrapAsARMVariable("singleQuote") + common.WrapAsARMVariable("servicePrincipalClientSecret") + common.WrapAsARMVariable("singleQuote"),
-		APIServerCertificate: common.WrapAsParameter("apiServerCertificate"),
-		KubeletPrivateKey:    common.WrapAsParameter("clientPrivateKey"),
-		ClusterKeyVaultName:  common.WrapAsARMVariable("clusterKeyVaultName"),
+		Location:              common.WrapAsARMVariable("location"),
+		ResourceGroup:         common.WrapAsARMVariable("resourceGroup"),
+		TenantID:              common.WrapAsARMVariable("tenantID"),
+		SubscriptionID:        common.WrapAsARMVariable("subscriptionId"),
+		ClientID:              common.WrapAsARMVariable("servicePrincipalClientId"),
+		ClientSecret:          common.WrapAsARMVariable("singleQuote") + common.WrapAsARMVariable("servicePrincipalClientSecret") + common.WrapAsARMVariable("singleQuote"),
+		APIServerCertificate:  common.WrapAsParameter("apiServerCertificate"),
+		KubeletPrivateKey:     common.WrapAsParameter("clientPrivateKey"),
+		ClusterKeyVaultName:   common.WrapAsARMVariable("clusterKeyVaultName"),
+		CACertificate:         common.WrapAsParameter("caCertificate"),
+		KubeConfigServer:      common.WrapAsARMVariable("kubeconfigServer"),
+		MasterFQDN:            common.WrapAsARMVariable("masterFqdnPrefix"),
+		KubeConfigCertificate: common.WrapAsParameter("kubeConfigCertificate"),
+		KubeConfigKey:         common.WrapAsParameter("kubeConfigPrivateKey"),
 	}
 
 	var loadBalancerSku string
@@ -155,6 +160,7 @@ func getK8sMasterVars(cs *api.ContainerService) (map[string]interface{}, error) 
 		"healthMonitorScript":          getBase64EncodedGzippedCustomScript(kubernetesHealthMonitorScript, cs),
 		"kubeletMonitorSystemdService": getBase64EncodedGzippedCustomScript(kubernetesKubeletMonitorSystemdService, cs),
 		"dockerMonitorSystemdService":  getBase64EncodedGzippedCustomScript(kubernetesDockerMonitorSystemdService, cs),
+		"generateKrustletKubeconfig":   getBase64EncodedGzippedCustomScript(generateKrustletKubeconfig, cs),
 	}
 
 	if enableEncryptionWithExternalKms {

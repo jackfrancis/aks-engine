@@ -1097,6 +1097,16 @@ func (p *Properties) HasNonRegularPriorityScaleset() bool {
 	return false
 }
 
+// HasKrustletNodePool returns true if the cluster contains at least one pool with a krustlet role
+func (p *Properties) HasKrustletNodePool() bool {
+	for _, agentPoolProfile := range p.AgentPoolProfiles {
+		if agentPoolProfile.Role == AgentPoolProfileRoleKrustlet {
+			return true
+		}
+	}
+	return false
+}
+
 // GetNonMasqueradeCIDR returns the non-masquerade CIDR for the ip-masq-agent.
 func (p *Properties) GetNonMasqueradeCIDR() string {
 	var nonMasqCidr string
@@ -1493,6 +1503,11 @@ func (a *AgentPoolProfile) IsUbuntu() bool {
 // IsUbuntuNonVHD returns true if the distro uses a base Ubuntu image
 func (a *AgentPoolProfile) IsUbuntuNonVHD() bool {
 	return a.IsUbuntu() && !a.IsVHDDistro()
+}
+
+// IsKrustletNode returns if this is a krustlet-enabled node
+func (a *AgentPoolProfile) IsKrustletNode() bool {
+	return a.Role == AgentPoolProfileRoleKrustlet
 }
 
 // RequiresCloudproviderConfig returns true if the azure.json cloudprovider config should be delivered to the nodes in this pool
@@ -2191,15 +2206,20 @@ func (cs *ContainerService) GetAzureProdFQDN() string {
 // ProvisionScriptParametersInput is the struct used to pass in Azure environment variables and secrets
 // as either values or ARM template variables when generating provision script parameters.
 type ProvisionScriptParametersInput struct {
-	Location             string
-	ResourceGroup        string
-	TenantID             string
-	SubscriptionID       string
-	ClientID             string
-	ClientSecret         string
-	APIServerCertificate string
-	KubeletPrivateKey    string
-	ClusterKeyVaultName  string
+	Location              string
+	ResourceGroup         string
+	TenantID              string
+	SubscriptionID        string
+	ClientID              string
+	ClientSecret          string
+	APIServerCertificate  string
+	KubeletPrivateKey     string
+	ClusterKeyVaultName   string
+	CACertificate         string
+	KubeConfigServer      string
+	MasterFQDN            string
+	KubeConfigCertificate string
+	KubeConfigKey         string
 }
 
 // GetProvisionScriptParametersCommon returns the environment variables needed to run the Linux bootstrap scripts
@@ -2265,6 +2285,11 @@ func (cs *ContainerService) GetProvisionScriptParametersCommon(input ProvisionSc
 		"MS_APT_REPO":                             kubernetesConfig.MicrosoftAptRepositoryURL,
 		"TAGS":                                    kubernetesConfig.Tags,
 		"ENABLE_MULTIPLE_STANDARD_LOAD_BALANCERS": strconv.FormatBool(to.Bool(kubernetesConfig.EnableMultipleStandardLoadBalancers)),
+		"CA_CERTIFICATE":                          input.CACertificate,
+		"KUBECONFIG_SERVER":                       input.KubeConfigServer,
+		"MASTER_FQDN":                             input.MasterFQDN,
+		"KUBECONFIG_CERTIFICATE":                  input.KubeConfigCertificate,
+		"KUBECONFIG_KEY":                          input.KubeConfigKey,
 	}
 
 	keys := make([]string, 0)
